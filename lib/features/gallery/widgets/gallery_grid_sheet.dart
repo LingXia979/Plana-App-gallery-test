@@ -4,7 +4,12 @@ import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart' show HitTestResult;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show RenderMetaData;
+import 'package:flutter/rendering.dart'
+    show
+        RenderMetaData,
+        SliverConstraints,
+        SliverGridGeometry,
+        SliverGridLayout;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gal/gal.dart';
 import 'package:share_plus/share_plus.dart';
@@ -16,6 +21,7 @@ import '../../generate/widgets/common.dart'
     show ExpandBody, hintSnack, sharedAxisRoute;
 import '../../import/import_panel.dart';
 import '../gallery_dates.dart';
+import '../gallery_groups.dart';
 import '../gallery_search.dart';
 import '../gallery_state.dart';
 import '../models.dart';
@@ -27,8 +33,11 @@ import 'result_badge_chip.dart';
 import 'result_thumb.dart';
 import '../../../core/util/haptics.dart';
 
-/// 「›」展开:全部作品网格弹层,按天分段显示;可按模型/时间筛选、按提示词
-/// 标签搜索(数据源 gallery_search 检索索引,筛选条件全 AND 组合)。
+/// 「›」展开:全部作品网格弹层。默认按时间分段;可切成**按角色 / 按画风堆叠**
+/// —— 一个角色(或一个画风)收成一张封面卡,点开才展开该堆的网格
+/// (归属见 gallery_groups,全程离线)。
+/// 可按模型/时间筛选、按提示词标签搜索(数据源 gallery_search 检索索引,
+/// 筛选条件全 AND 组合)。
 /// 点选一张即回填画布并关闭;长按弹出该张的导入 / 保存 / 删除菜单。
 /// 多选只从右上角「多选」进,段头可整段全选,底部批量保存相册 / 分享 /
 /// 批量删除 —— 批量操作只作用于当前可见集合。
@@ -50,7 +59,8 @@ class _GalleryGridSheet extends ConsumerStatefulWidget {
   ConsumerState<_GalleryGridSheet> createState() => _GalleryGridSheetState();
 }
 
-class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
+class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet>
+    with SingleTickerProviderStateMixin {
   bool _selecting = false;
   final Set<String> _picked = {};
   bool _saving = false;
@@ -72,6 +82,61 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
   // 不该每次开网格都先筛一遍。
   late int _daysFilter = ref.read(uiPrefsProvider).galleryDaysFilter;
 
+  // 分组维度,同样记住上次的。存的是枚举名,不是下标 —— 将来插一档不会把
+  // 老用户的选择挪到别的维度去。
+  late GalleryGroupBy _groupBy = GalleryGroupBy.values.firstWhere(
+    (e) => e.name == ref.read(uiPrefsProvider).galleryGroupBy,
+    orElse: () => GalleryGroupBy.day,
+  );
+
+  // ---- 双指捏合改列数 ----
+  //
+  // 走 Listener 而不是 GestureDetector(onScale*):后者会把**单指**拖动也拉进
+  // 手势竞技场,和列表自己的竖向滚动抢,滚动就废了。Listener 只旁听原始指针事件、
+  // 完全不参与竞技场;列表则在捏合期间换上 [_FrozenScrollPhysics] —— 不滚,
+  // 但仍占着手势,免得弹层的下拉关闭捡漏。
+  //
+  // **手势只负责触发,不负责驱动**:指间距过阈值就换一档,过渡由 [_morph] 自己
+  // 跑完。曾经做过全程跟手的版本(进度实时跟指间距走),那样手指的微抖会一分不差
+  // 地变成网格几何,整片图跟着颤;死区、增益、低通三道一起上也压不干净 ——
+  // 换一档本来就是个离散决定,拿连续量去驱动它是自找的麻烦。
+  //
+  // 过渡本身仍是 [_ZoomGridDelegate] 的几何插值:每一格从旧位置连续走到新位置,
+  // 而不是整片画面缩放再交叉淡化。
+  late int _cols = ref.read(uiPrefsProvider).galleryColumns;
+
+  /// 触发一档所需的指间距倍率。取对数看两个方向基本对称(±0.22)。
+  static const _kZoomIn = 1.25; // 撑开到 1.25 倍 → 少一列
+  static const _kZoomOut = .8; // 收拢到 0.8 倍 → 多一列
+
+  final _pointers = <int, Offset>{};
+  double? _span0; // 基准指间距;每换一档就重取,于是可以一路捏下去
+  final _bodyKey = GlobalKey();
+
+  /// 过渡中的目标列数;null = 没在过渡。
+  int? _toCols;
+
+  /// 当前列数 → 目标列数的进度 0..1,网格几何按它插值。只由 [_morph] 驱动。
+  double _t = 0;
+
+  late final AnimationController _morph = AnimationController(
+    vsync: this,
+    duration: Motion.medium,
+  );
+
+  final ScrollController _ctrl = ScrollController();
+
+  // 锚定:把「触发那一刻焦点落在内容里的相对位置」钉住,否则列数一变内容总高
+  // 跟着变,画面会整体上下漂。
+  double _anchorOff = 0, _anchorContent = 0, _focalY = 0;
+
+  /// 堆叠视图里**已经点开**的那一堆(键);null = 正看封面墙。
+  ///
+  /// 换分组维度时清掉(那一堆在新维度下不存在)。**筛选变化不清** —— 堆是从
+  /// 筛选后的集合算出来的,所以在堆里搜索是在这一堆内收窄;收窄到空时这一堆
+  /// 自己就没了,build 里那句 firstOrNull 取不到,自动退回封面墙。
+  String? _openKey;
+
   // ---- 多选操作栏的几何 ----
   static const _actH = 46.0;
   static const _actSubH = 38.0;
@@ -80,6 +145,8 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
   @override
   void initState() {
     super.initState();
+    _morph.addStatusListener(_onMorphDone);
+    _morph.addListener(_onMorphTick);
     final prefs = ref.read(prefsStoreProvider);
     if (prefs.get(_kGridHintKey) != null) return;
     prefs.write(key: _kGridHintKey, value: '1');
@@ -95,8 +162,33 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
     });
   }
 
+  /// 过渡每一帧:推进插值进度并回正滚动位置。
+  void _onMorphTick() {
+    setState(() => _t = Motion.emphasized.transform(_morph.value));
+    _reanchorAfterLayout();
+  }
+
+  void _onMorphDone(AnimationStatus st) {
+    if (st != AnimationStatus.completed) return;
+    _endMorph();
+    _persistCols();
+  }
+
+  /// 落定:目标列数坐实成当前列数。中途被新的一档打断时也走这里。
+  void _endMorph() {
+    final to = _toCols;
+    if (to == null) return;
+    setState(() {
+      _cols = to;
+      _toCols = null;
+      _t = 0;
+    });
+  }
+
   @override
   void dispose() {
+    _morph.dispose();
+    _ctrl.dispose();
     _searchDebounce?.cancel();
     _searchCtrl.dispose();
     _searchFocus.dispose();
@@ -256,6 +348,25 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
     );
   }
 
+  void _pickGroupBy() {
+    // 不带计数:算另外两个维度的归属要把它们的 provider 都拉起来,而用户只是
+    // 想换个分组。归不了的有多少,封面墙上那堆「未归类」自己会说。
+    _pickFilter<GalleryGroupBy>(
+      title: '分组方式',
+      current: _groupBy,
+      options: [for (final v in GalleryGroupBy.values) (v.label, v, null)],
+      onPick: (v) {
+        ref
+            .read(uiPrefsProvider.notifier)
+            .patch((p) => p.copyWith(galleryGroupBy: v.name));
+        setState(() {
+          _groupBy = v;
+          _openKey = null; // 换了维度,原来点开的那一堆不存在了
+        });
+      },
+    );
+  }
+
   Widget _chip(
     ColorScheme scheme, {
     required String label,
@@ -290,14 +401,100 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
     );
   }
 
-  /// 天分段段头:日期 + 张数;多选态尾部整段全选/取消。
-  Widget _dayHeader(
-    ColorScheme scheme,
-    int dayKey,
-    List<ResultImage> items,
-    DateTime now,
-  ) {
-    final ids = [for (final r in items) r.id];
+  /// 一段图的网格 sliver。分段列表与点开的单堆共用 —— 两边的交互(点选回填、
+  /// 长按菜单、拖选的 MetaData 反查)必须逐条一致,写两遍迟早走岔。
+  ///
+  /// 缩略图本体还各带 5(描边 2.5 + 让位 2.5)的内缩,所以图与图之间实际留白 =
+  /// 这里的 spacing + 10。收到 6 之后是 16,省下的宽度全给图。
+  Widget _gridSliver(List<ResultImage> items, String? selectedId) =>
+      SliverPadding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+        sliver: SliverGrid(
+          gridDelegate: _zoomDelegate(
+            (cols) => SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: cols,
+              mainAxisSpacing: 6,
+              crossAxisSpacing: 6,
+            ),
+          ),
+          delegate: SliverChildBuilderDelegate((_, i) {
+            final r = items[i];
+            // 拖选靠命中路径反查这个 id,见 _idAt
+            return MetaData(
+              metaData: r.id,
+              child: _GridThumb(
+                result: r,
+                selected: !_selecting && r.id == selectedId,
+                picked: _selecting && _picked.contains(r.id),
+                selecting: _selecting,
+                onTap: () {
+                  if (_selecting) {
+                    _toggle(r.id);
+                  } else {
+                    ref.read(galleryProvider.notifier).select(r.id);
+                    Navigator.of(context).pop();
+                  }
+                },
+                // 捏合期间也关:两指按住不动够 500ms 就会在其中一张上弹菜单
+                onLongPress: _selecting || _pinching
+                    ? null
+                    : (from) => _thumbMenu(r.id, from),
+              ),
+            );
+          }, childCount: items.length),
+        ),
+      );
+
+  /// 堆的封面墙:一堆一张卡。点一下进那一堆;多选态下点一下整堆全勾/全取消
+  /// —— 封面墙这一层的「一个单位」就是一整堆,按单张勾在这里没有落点。
+  Widget _stackSliver(ColorScheme scheme, List<GalleryGroup> groups) {
+    // 封面是方的,底下还得放名字与张数两行 —— 那两行是**固定高**,不该跟着格宽缩,
+    // 所以主轴高按「格宽 + 文字高」现算,而不是钉一个 childAspectRatio。
+    // (钉比例的话,列数一多文字就被压没;跟着字号缩放走同理。)
+    //
+    // 宽度取 SliverConstraints.crossAxisExtent,不取屏宽 —— 弹层宽度未必等于屏宽
+    // (主题给 bottomSheet 设了 constraints、或大屏上就会不等)。
+    const pad = 12.0 * 2, gap = 6.0;
+    final textH = 44 * MediaQuery.textScalerOf(context).scale(1);
+    return SliverLayoutBuilder(
+      builder: (_, cons) => SliverPadding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+        sliver: SliverGrid(
+          gridDelegate: _zoomDelegate((cols) {
+            final cellW =
+                (cons.crossAxisExtent - pad - gap * (cols - 1)) / cols;
+            return SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: cols,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: gap,
+              mainAxisExtent: cellW + textH,
+            );
+          }),
+          delegate: SliverChildBuilderDelegate((_, i) {
+            final g = groups[i];
+            final ids = [for (final r in g.items) r.id];
+            final allOn = ids.every(_picked.contains);
+            return _GroupCard(
+              group: g,
+              selecting: _selecting,
+              picked: _selecting && allOn,
+              onTap: () => setState(() {
+                if (_selecting) {
+                  allOn ? _picked.removeAll(ids) : _picked.addAll(ids);
+                } else {
+                  _openKey = g.key;
+                }
+              }),
+            );
+          }, childCount: groups.length),
+        ),
+      ),
+    );
+  }
+
+  /// 分段段头:组名 + 张数;多选态尾部整段全选/取消。
+  Widget _groupHeader(ColorScheme scheme, GalleryGroup g) {
+    final ids = [for (final r in g.items) r.id];
     final allOn = ids.every(_picked.contains);
     return Padding(
       // 跟着网格一起往里收 4:段头文字要和其下第一张图的左边缘对齐
@@ -305,14 +502,14 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
       child: Row(
         children: [
           Text(
-            galleryDayLabel(dayKey, now),
+            g.label,
             style: context.texts.titleSmall!.copyWith(
               fontWeight: FontWeight.w700,
             ),
           ),
           const SizedBox(width: 7),
           Text(
-            '${items.length} 张',
+            '${g.items.length} 张',
             style: context.texts.bodySmall!.copyWith(
               color: scheme.onSurfaceVariant,
             ),
@@ -408,16 +605,162 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
     _dragSeen.clear();
   }
 
-  /// 给网格套上拖选手势。非多选态传 null 处理器 —— 手势识别器不参与竞技场,
-  /// 横滑照常落到下层(将来要加横滑手势也不会被这层截胡)。
-  Widget _dragSelectLayer({required Widget child}) => GestureDetector(
-    behavior: HitTestBehavior.translucent,
-    onHorizontalDragStart: _selecting ? _dragSelectStart : null,
-    onHorizontalDragUpdate: _selecting ? _dragSelectUpdate : null,
-    onHorizontalDragEnd: _selecting ? (_) => _dragSelectEnd() : null,
-    onHorizontalDragCancel: _selecting ? _dragSelectEnd : null,
+  double get _span {
+    final p = _pointers.values.toList();
+    return (p[0] - p[1]).distance;
+  }
+
+  Offset get _mid {
+    final p = _pointers.values.toList();
+    return (p[0] + p[1]) / 2;
+  }
+
+  /// 双指按住中。此时列表换 [_FrozenScrollPhysics]:不滚,但仍参与手势竞技场。
+  bool get _pinching => _pointers.length >= 2;
+
+  void _persistCols() {
+    if (_cols == ref.read(uiPrefsProvider).galleryColumns) return;
+    ref
+        .read(uiPrefsProvider.notifier)
+        .patch((p) => p.copyWith(galleryColumns: _cols));
+  }
+
+  /// 记下锚点:触发那一刻焦点落在**内容**里的相对位置。
+  void _takeAnchor() {
+    final box = _bodyKey.currentContext?.findRenderObject() as RenderBox?;
+    _focalY = box == null || _pointers.length < 2
+        ? 0
+        : box.globalToLocal(_mid).dy;
+    if (!_ctrl.hasClients) {
+      _anchorOff = _anchorContent = 0;
+      return;
+    }
+    final pos = _ctrl.position;
+    _anchorOff = pos.pixels;
+    _anchorContent = pos.maxScrollExtent + pos.viewportDimension;
+  }
+
+  /// 按锚点回正滚动位置。**必须在布局之后跑**(见下)。
+  ///
+  /// 列数一变内容总高就变,而 ScrollPosition 只认像素 —— 不回正的话,焦点上方
+  /// 的内容长高/缩矮多少,画面就整体漂多少。这里保持**焦点在内容里的比例**不变。
+  ///
+  /// 内容总高取实测(`maxScrollExtent + viewportDimension`),不按列数推算:
+  /// 三种视图(分段列表带段头、封面墙、单堆)的高度构成各不一样,推不准。
+  ///
+  /// ⚠ 放在指针事件 / 动画 tick 里算是**错的**,而且是会抖的那种错:那时拿到的
+  /// 总高还是上一帧的(布局还没跟着新进度跑),按它算出的像素又会成为下一帧布局
+  /// 的输入 —— 一来一回构成反馈环,整片网格每帧上下弹。放在帧后就没有环:总高与
+  /// 当前进度对得上,跳完只改像素不改总高,下一次算出来就等于当前值,一帧收敛。
+  void _reanchor() {
+    if (_anchorContent <= 0 || !_ctrl.hasClients) return;
+    final pos = _ctrl.position;
+    final content = pos.maxScrollExtent + pos.viewportDimension;
+    if (content <= 0) return;
+    final want = ((_anchorOff + _focalY) * content / _anchorContent - _focalY)
+        .clamp(0.0, pos.maxScrollExtent);
+    if ((want - pos.pixels).abs() > 1.5) _ctrl.jumpTo(want);
+  }
+
+  bool _reanchorQueued = false;
+
+  void _reanchorAfterLayout() {
+    if (_reanchorQueued) return;
+    _reanchorQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _reanchorQueued = false;
+      if (mounted) _reanchor();
+    });
+  }
+
+  /// 起一次换档过渡。上一档还没跑完就先把它落定,再从新的一级起步 ——
+  /// 一路捏下去时不会两段过渡叠在一起。
+  void _startMorph(int to) {
+    if (_morph.isAnimating) _endMorph();
+    _takeAnchor();
+    setState(() {
+      _toCols = to;
+      _t = 0;
+    });
+    Haptics.selection();
+    _morph.forward(from: 0);
+  }
+
+  void _pinchDown(PointerDownEvent e) {
+    _pointers[e.pointer] = e.position;
+    if (_pointers.length != 2) return;
+    _span0 = _span;
+    _dragSelectEnd(); // 拖选可能已经起手了,清掉半截状态
+    setState(() {}); // 进入捏合:冻结滚动、停拖选与长按
+  }
+
+  void _pinchMove(PointerMoveEvent e) {
+    if (!_pointers.containsKey(e.pointer)) return;
+    _pointers[e.pointer] = e.position;
+    final s0 = _span0;
+    if (_pointers.length != 2 || s0 == null || s0 < 1) return;
+
+    final r = _span / s0;
+    if (r < _kZoomIn && r > _kZoomOut) return; // 没到阈值,什么都不做
+    // 重取基准:再捏同样的幅度就是下一档。到头时也要重取,否则会一直卡在
+    // 阈值以外,手指一抖就反复触发。
+    _span0 = _span;
+
+    // 撑开 = 图变大 = 列变少
+    final want = (r >= 1 ? _cols - 1 : _cols + 1).clamp(
+      kGalleryMinColumns,
+      kGalleryMaxColumns,
+    );
+    if (want == _cols) return; // 到头了
+    _startMorph(want);
+  }
+
+  void _pinchUp(PointerEvent e) {
+    final was = _pinching;
+    _pointers.remove(e.pointer);
+    if (!was) return;
+    if (_pinching) {
+      _span0 = _span; // 三指落回两指:重新取基准,免得拿旧间距算出一次误触发
+      return;
+    }
+    _span0 = null;
+    setState(() {}); // 退出捏合:放开滚动
+    if (!_morph.isAnimating) _persistCols();
+  }
+
+  /// 网格几何的插值代理:没在两级之间就用当前列数的普通代理,不绕路。
+  SliverGridDelegate _zoomDelegate(SliverGridDelegate Function(int cols) of) {
+    final to = _toCols;
+    if (to == null || _t <= 0) return of(_cols);
+    return _ZoomGridDelegate(of, _cols, to, _t);
+  }
+
+  Widget _pinchLayer({required Widget child}) => Listener(
+    // 几何取这一层:缩放锚点要按它的局部坐标算
+    key: _bodyKey,
+    onPointerDown: _pinchDown,
+    onPointerMove: _pinchMove,
+    onPointerUp: _pinchUp,
+    onPointerCancel: _pinchUp,
     child: child,
   );
+
+  /// 给网格套上拖选手势。非多选态传 null 处理器 —— 手势识别器不参与竞技场,
+  /// 横滑照常落到下层(将来要加横滑手势也不会被这层截胡)。
+  ///
+  /// 捏合期间同样传 null:Listener 不进竞技场,双指横向张开在多选态下会被
+  /// 拖选当成一次划选,一捏就勾中一排。
+  Widget _dragSelectLayer({required Widget child}) {
+    final on = _selecting && !_pinching;
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragStart: on ? _dragSelectStart : null,
+      onHorizontalDragUpdate: on ? _dragSelectUpdate : null,
+      onHorizontalDragEnd: on ? (_) => _dragSelectEnd() : null,
+      onHorizontalDragCancel: on ? _dragSelectEnd : null,
+      child: child,
+    );
+  }
 
   void _toggleAll(List<ResultImage> results) {
     setState(() {
@@ -700,12 +1043,27 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
     // 批量操作永远只作用于当前可见集合,不留筛选外的"隐形勾选"
     _picked.removeWhere((id) => !filtered.any((r) => r.id == id));
 
-    // 按天分段:列表天然新→旧,键的首现序即段序
-    final byDay = <int, List<ResultImage>>{};
-    for (final r in filtered) {
-      byDay.putIfAbsent(galleryDayKey(r.createdAt), () => []).add(r);
-    }
-    final now = DateTime.now();
+    // 归属表只拉当前这个维度的 —— 另一个维度的 provider 不 watch 就不开算。
+    // 还在算(冷启第一次点开)时先当空表:全落「未归类」,算完自然刷成正确的堆,
+    // 不拿一个转圈把整页挡住。
+    final tags = switch (_groupBy) {
+      GalleryGroupBy.character => ref.watch(galleryCharTagsProvider),
+      GalleryGroupBy.style => ref.watch(galleryStyleTagsProvider),
+      GalleryGroupBy.day => const AsyncValue<Map<String, List<GroupTag>>>.data(
+        {},
+      ),
+    };
+    // 只有从没算出过结果时才提示。增量重算(每出一张新图)也会 isLoading 一帧,
+    // 那一下闪字纯属噪音 —— 旧结果还在,画面根本没变。
+    final grouping = tags.isLoading && !tags.hasValue;
+    final groups = _groupBy.stacked
+        ? groupByTags(filtered, tags.value ?? const {})
+        : groupByDay(filtered, DateTime.now());
+
+    // 点开的那一堆:筛选变了/图删了可能已经不在,不在就自动退回封面墙
+    final open = _openKey == null
+        ? null
+        : groups.where((g) => g.key == _openKey).firstOrNull;
 
     final scheme = context.scheme;
     final h = MediaQuery.of(context).size.height * 0.82;
@@ -713,11 +1071,16 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
 
     return PopScope(
       // 多选态下系统返回/侧滑先退多选,不关弹层 —— 勾了十几张再手滑退出,
-      // 重新勾一遍的代价比多按一次返回大得多。非多选态照常放行,
-      // 好让预测式返回该怎么演就怎么演。
-      canPop: !_selecting,
+      // 重新勾一遍的代价比多按一次返回大得多。点开了某一堆时同理,返回先收回
+      // 封面墙。两者都没有才照常放行,好让预测式返回该怎么演就怎么演。
+      canPop: !_selecting && open == null,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && _selecting) _exitSelect();
+        if (didPop) return;
+        if (_selecting) {
+          _exitSelect();
+        } else if (open != null) {
+          setState(() => _openKey = null);
+        }
       },
       child: SizedBox(
         height: h,
@@ -756,15 +1119,36 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
                       )
                     : Row(
                         children: [
-                          Text(
-                            '全部作品',
-                            style: context.texts.titleMedium!.copyWith(
-                              fontWeight: FontWeight.w700,
+                          if (open != null)
+                            IconButton(
+                              onPressed: () => setState(() => _openKey = null),
+                              visualDensity: VisualDensity.compact,
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(
+                                minWidth: 32,
+                                minHeight: 32,
+                              ),
+                              tooltip: '回到全部',
+                              icon: const Icon(Icons.arrow_back, size: 21),
+                            ),
+                          if (open != null) const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              open?.label ?? '全部作品',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: context.texts.titleMedium!.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                           ),
                           const SizedBox(width: 8),
                           Text(
-                            filtering
+                            // 各堆张数之和会大于总数(一张多角色的图进多堆),
+                            // 所以封面墙上报的仍是**去重后**的总数。
+                            open != null
+                                ? '${open.items.length} 张'
+                                : filtering
                                 ? '${filtered.length}/${results.length} 张'
                                 : '${results.length} 张',
                             style: context.texts.bodySmall!.copyWith(
@@ -826,11 +1210,18 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
                 ),
               ),
             ),
-            // 筛选 chips + 检索索引回填进度
+            // 分组 + 筛选 chips + 检索索引回填进度
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               child: Row(
                 children: [
+                  _chip(
+                    scheme,
+                    label: _groupBy.label,
+                    active: _groupBy != GalleryGroupBy.day,
+                    onTap: _pickGroupBy,
+                  ),
+                  const SizedBox(width: 8),
                   _chip(
                     scheme,
                     label: _modelFilter == null
@@ -851,7 +1242,7 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
                     active: _daysFilter != 0,
                     onTap: _pickTimeFilter,
                   ),
-                  if (search.building) ...[
+                  if (search.building || grouping) ...[
                     const Spacer(),
                     const SizedBox(
                       width: 12,
@@ -860,7 +1251,9 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
                     ),
                     const SizedBox(width: 6),
                     Text(
-                      '索引 ${search.done}/${search.total}',
+                      search.building
+                          ? '索引 ${search.done}/${search.total}'
+                          : '分组中',
                       style: context.texts.bodySmall!.copyWith(
                         color: scheme.outline,
                       ),
@@ -870,82 +1263,56 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
               ),
             ),
             Expanded(
-              child: _dragSelectLayer(
-                child: filtered.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              filtering
-                                  ? Icons.search_off
-                                  : Icons.image_outlined,
-                              size: 40,
-                              color: scheme.outline,
-                            ),
-                            const SizedBox(height: 10),
-                            Text(
-                              filtering ? '没有符合条件的作品' : '图库是空的',
-                              style: context.texts.bodyMedium!.copyWith(
-                                color: scheme.onSurfaceVariant,
+              child: _pinchLayer(
+                child: _dragSelectLayer(
+                  child: filtered.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                filtering
+                                    ? Icons.search_off
+                                    : Icons.image_outlined,
+                                size: 40,
+                                color: scheme.outline,
                               ),
+                              const SizedBox(height: 10),
+                              Text(
+                                filtering ? '没有符合条件的作品' : '图库是空的',
+                                style: context.texts.bodyMedium!.copyWith(
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : CustomScrollView(
+                          controller: _ctrl,
+                          // 双指按住、以及换档过渡跑完之前都不滚 ——
+                          // 见 [_FrozenScrollPhysics]
+                          physics: _pinching || _morph.isAnimating
+                              ? const _FrozenScrollPhysics()
+                              : null,
+                          slivers: [
+                            // 三种身姿:点开的单堆 / 堆的封面墙 / 分段列表
+                            if (open != null)
+                              _gridSliver(open.items, state.selectedId)
+                            else if (_groupBy.stacked)
+                              _stackSliver(scheme, groups)
+                            else
+                              for (final g in groups) ...[
+                                SliverToBoxAdapter(
+                                  child: _groupHeader(scheme, g),
+                                ),
+                                _gridSliver(g.items, state.selectedId),
+                              ],
+                            const SliverToBoxAdapter(
+                              child: SizedBox(height: 10),
                             ),
                           ],
                         ),
-                      )
-                    : CustomScrollView(
-                        slivers: [
-                          for (final e in byDay.entries) ...[
-                            SliverToBoxAdapter(
-                              child: _dayHeader(scheme, e.key, e.value, now),
-                            ),
-                            // 缩略图本体还各带 5(描边 2.5 + 让位 2.5)的内缩,
-                            // 所以图与图之间实际留白 = 这里的 spacing + 10。
-                            // 收到 6 之后是 16,省下的宽度全给图。
-                            SliverPadding(
-                              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-                              sliver: SliverGrid(
-                                gridDelegate:
-                                    const SliverGridDelegateWithFixedCrossAxisCount(
-                                      crossAxisCount: 3,
-                                      mainAxisSpacing: 6,
-                                      crossAxisSpacing: 6,
-                                    ),
-                                delegate: SliverChildBuilderDelegate((_, i) {
-                                  final r = e.value[i];
-                                  // 拖选靠命中路径反查这个 id,见 _idAt
-                                  return MetaData(
-                                    metaData: r.id,
-                                    child: _GridThumb(
-                                      result: r,
-                                      selected:
-                                          !_selecting &&
-                                          r.id == state.selectedId,
-                                      picked:
-                                          _selecting && _picked.contains(r.id),
-                                      selecting: _selecting,
-                                      onTap: () {
-                                        if (_selecting) {
-                                          _toggle(r.id);
-                                        } else {
-                                          ref
-                                              .read(galleryProvider.notifier)
-                                              .select(r.id);
-                                          Navigator.of(context).pop();
-                                        }
-                                      },
-                                      onLongPress: _selecting
-                                          ? null
-                                          : (from) => _thumbMenu(r.id, from),
-                                    ),
-                                  );
-                                }, childCount: e.value.length),
-                              ),
-                            ),
-                          ],
-                          const SliverToBoxAdapter(child: SizedBox(height: 10)),
-                        ],
-                      ),
+                ),
               ),
             ),
             // 多选操作栏:进出多选随高度动画滑入滑出
@@ -1066,6 +1433,279 @@ class _GalleryGridSheetState extends ConsumerState<_GalleryGridSheet> {
       ),
     );
   }
+}
+
+/// 两套网格几何之间的线性插值代理。
+///
+/// 这是「图片真的在挪窝」的全部实现:每一格的位置与尺寸,都从 [colsA] 列下的值
+/// 连续走到 [colsB] 列下的值。整张画面缩放做不到这件事 —— 那样所有格子只是被
+/// 一起放大,相对关系纹丝不动,而换列数恰恰是**相对关系**在变(第 4 张从第一行
+/// 末尾挪到第二行开头)。
+class _ZoomGridDelegate extends SliverGridDelegate {
+  const _ZoomGridDelegate(this.of, this.colsA, this.colsB, this.t);
+
+  /// 按列数造一份普通代理。两种网格(方格缩略图 / 带两行字的封面卡)各自的
+  /// 尺寸算法不同,所以由调用方传进来。
+  final SliverGridDelegate Function(int cols) of;
+  final int colsA, colsB;
+  final double t;
+
+  @override
+  SliverGridLayout getLayout(SliverConstraints constraints) => _LerpGridLayout(
+    of(colsA).getLayout(constraints),
+    of(colsB).getLayout(constraints),
+    t,
+  );
+
+  @override
+  bool shouldRelayout(covariant _ZoomGridDelegate old) =>
+      old.t != t || old.colsA != colsA || old.colsB != colsB;
+}
+
+class _LerpGridLayout extends SliverGridLayout {
+  const _LerpGridLayout(this.a, this.b, this.t);
+
+  final SliverGridLayout a, b;
+  final double t;
+
+  double _l(double x, double y) => x + (y - x) * t;
+
+  @override
+  SliverGridGeometry getGeometryForChildIndex(int index) {
+    final ga = a.getGeometryForChildIndex(index);
+    final gb = b.getGeometryForChildIndex(index);
+    return SliverGridGeometry(
+      scrollOffset: _l(ga.scrollOffset, gb.scrollOffset),
+      crossAxisOffset: _l(ga.crossAxisOffset, gb.crossAxisOffset),
+      mainAxisExtent: _l(ga.mainAxisExtent, gb.mainAxisExtent),
+      crossAxisExtent: _l(ga.crossAxisExtent, gb.crossAxisExtent),
+    );
+  }
+
+  @override
+  double computeMaxScrollOffset(int childCount) => _l(
+    a.computeMaxScrollOffset(childCount),
+    b.computeMaxScrollOffset(childCount),
+  );
+
+  // 可见区间取两套布局的**并集**:插值后的位置一定夹在两者之间,取并集才不会
+  // 把边缘上那一两格漏建(漏了就是滚动到边界时凭空出现一块空白)。
+  @override
+  int getMinChildIndexForScrollOffset(double scrollOffset) => math.min(
+    a.getMinChildIndexForScrollOffset(scrollOffset),
+    b.getMinChildIndexForScrollOffset(scrollOffset),
+  );
+
+  @override
+  int getMaxChildIndexForScrollOffset(double scrollOffset) => math.max(
+    a.getMaxChildIndexForScrollOffset(scrollOffset),
+    b.getMaxChildIndexForScrollOffset(scrollOffset),
+  );
+}
+
+/// 捏合期间给列表用的滚动物理:**照常参与手势竞技场,但不产生位移**。
+///
+/// 为什么不用 `NeverScrollableScrollPhysics`:它的 `shouldAcceptUserOffset`
+/// 返回 false,Scrollable 会把自己的拖动识别器撤掉 —— 竞技场里少了它,弹层
+/// 自己的「下拉关闭」就赢了,于是捏一下整个浮窗被拽下去。捏合时既要列表别动,
+/// 又要它继续占着这个手势不放,两件事得分开:accept 照给,位移给 0。
+///
+/// 顺带,不给弹道模拟 —— 否则松手那一下还会甩出一段惯性。
+class _FrozenScrollPhysics extends ScrollPhysics {
+  const _FrozenScrollPhysics({super.parent});
+
+  @override
+  _FrozenScrollPhysics applyTo(ScrollPhysics? ancestor) =>
+      _FrozenScrollPhysics(parent: buildParent(ancestor));
+
+  /// 恒真:内容不足一屏时也要占住手势,否则短列表捏一下就把弹层拖走了。
+  @override
+  bool shouldAcceptUserOffset(ScrollMetrics position) => true;
+
+  @override
+  double applyPhysicsToUserOffset(ScrollMetrics position, double offset) => 0;
+
+  @override
+  Simulation? createBallisticSimulation(
+    ScrollMetrics position,
+    double velocity,
+  ) => null;
+}
+
+/// 堆的封面卡:封面图 + 身后两片露边的「还有更多」+ 名字 + 张数。
+///
+/// 叠影只在堆里不止一张时画 —— 一张的堆画了叠影是在说谎,而用户点进去就会发现。
+///
+/// 叠影用**堆里后面几张的真缩略图**,盖一层与底同色的薄纱压暗、往后推。纯色片
+/// 也能表达「还有更多」,但露出的那两条边是死的;换成真图之后每一堆的边缘颜色
+/// 都不一样,一眼能看出堆与堆的差别。缩略图本来就是懒读 + 有缓存的(见
+/// [galleryThumbProvider]),多读两张不构成负担。
+///
+/// 张数不够时后面那片退回用第 2 张 —— 只露 6px 的一条边,重复看不出来,而让
+/// 几何随张数变会使卡片大小参差不齐,那个更难看。
+class _GroupCard extends StatelessWidget {
+  const _GroupCard({
+    required this.group,
+    required this.selecting,
+    required this.picked,
+    required this.onTap,
+  });
+
+  final GalleryGroup group;
+  final bool selecting;
+
+  /// 多选态:这一堆是否**整堆**都已勾选。
+  final bool picked;
+  final VoidCallback onTap;
+
+  /// 每片叠影露出多少。两片,所以封面比整格窄 2 倍这个数。
+  /// 6 是「看得出是张照片」和「别把封面挤小」之间的折中。
+  static const _peek = 6.0;
+
+  /// 堆里第 [i] 张;不够就 null。
+  ResultImage? _at(int i) => i < group.items.length ? group.items[i] : null;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = context.scheme;
+    final cover = group.items.first;
+    final piled = group.items.length > 1;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Expanded 而不是 AspectRatio:格高由 childAspectRatio 定死,名字那两行
+          // 在大字号下会变高,让图去吸收才不会溢出(溢出在 debug 下是黄条)。
+          Expanded(
+            child: LayoutBuilder(
+              builder: (_, c) {
+                final side = math.min(c.maxWidth, c.maxHeight);
+                final w = side - (piled ? _peek * 2 : 0);
+                return SizedBox(
+                  width: side,
+                  height: side,
+                  child: Stack(
+                    children: [
+                      if (piled) ...[
+                        _plate(scheme, _peek * 2, w, .62, _at(2) ?? _at(1)),
+                        _plate(scheme, _peek, w, .38, _at(1)),
+                      ],
+                      Positioned(
+                        left: 0,
+                        top: 0,
+                        child: AnimatedContainer(
+                          duration: Motion.fast,
+                          curve: Motion.standard,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(13),
+                            border: Border.all(
+                              color: picked
+                                  ? scheme.primary
+                                  : Colors.transparent,
+                              width: 2.5,
+                            ),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(1.5),
+                            child: ResultThumb(
+                              result: cover,
+                              width: w - 8,
+                              height: w - 8,
+                              radius: 10,
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (selecting)
+                        Positioned(
+                          left: 5,
+                          top: 5,
+                          child: Container(
+                            width: 22,
+                            height: 22,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: picked
+                                  ? scheme.primary
+                                  : Colors.black.withValues(alpha: .35),
+                              border: Border.all(
+                                color: Colors.white.withValues(alpha: .9),
+                                width: 1.5,
+                              ),
+                            ),
+                            child: picked
+                                ? Icon(
+                                    Icons.check,
+                                    size: 14,
+                                    color: scheme.onPrimary,
+                                  )
+                                : null,
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            group.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: context.texts.bodyMedium!.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          Text(
+            '${group.items.length} 张',
+            maxLines: 1,
+            style: context.texts.bodySmall!.copyWith(color: scheme.outline),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 一片叠影。[inset] 是相对封面左上角的偏移,越靠后越淡。
+  /// 一片叠影。[inset] 是相对封面左上角的偏移,[veil] 是压在图上的薄纱浓度 ——
+  /// 越靠后越浓。薄纱取 [ColorScheme.surface]:浅色主题下是提亮、深色下是压暗,
+  /// 两边都读作「退到后面去了」,用黑色纱的话浅色主题里会变成一道脏影。
+  Widget _plate(
+    ColorScheme scheme,
+    double inset,
+    double side,
+    double veil,
+    ResultImage? img,
+  ) => Positioned(
+    left: inset,
+    top: inset,
+    child: SizedBox(
+      width: side,
+      height: side,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (img != null)
+            ResultThumb(result: img, width: side, height: side, radius: 10),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              // 没图(读不到 / 堆里就一张)时这层就是原来的纯色片
+              color: img == null
+                  ? scheme.surfaceContainerHighest.withValues(alpha: 1 - veil)
+                  : scheme.surface.withValues(alpha: veil),
+              border: Border.all(
+                color: scheme.outlineVariant.withValues(alpha: .55),
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _GridThumb extends StatelessWidget {

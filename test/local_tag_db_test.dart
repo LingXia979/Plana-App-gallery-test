@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plana_app/core/util/prompt_tokens.dart';
 import 'package:plana_app/features/editor/data/local_tag_db.dart';
 import 'package:plana_app/features/editor/data/suggestions.dart';
 
@@ -191,6 +192,49 @@ void main() {
       expect(countOf(form), 4350743, reason: form);
     }
   });
+
+  // ---- 角色反查(danbooru.tsv 第 5 列 category)----
+
+  test('charactersIn:认出角色标签,普通标签/作品/画师都不算', () async {
+    final db = LocalTagDb();
+    final hit = await db.charactersIn(
+      tokenizeSet('1girl, hakurei_reimu, long hair, highres, touhou, wlop'),
+    );
+    expect(hit.map((e) => e.tag), ['hakurei_reimu']);
+    expect(hit.single.zh, '博丽灵梦');
+    // touhou 是作品(类目 3)、wlop 是画师(类目 1)—— 本轮 category 只填了角色,
+    // 这两类留空,不能被当成角色捞出来。
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('charactersIn:下划线/括号两种写法同归一', () async {
+    final db = LocalTagDb();
+    for (final form in [
+      'ganyu_(genshin_impact)',
+      'ganyu (genshin impact)',
+      'Ganyu_(Genshin_Impact)',
+      '1.3::ganyu_(genshin_impact)::',
+    ]) {
+      final hit = await db.charactersIn(tokenizeSet(form));
+      expect(hit.map((e) => e.tag), ['ganyu_(genshin_impact)'], reason: form);
+    }
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('charactersIn:别名也认(reimu_hakurei → 博丽灵梦)', () async {
+    final db = LocalTagDb();
+    final hit = await db.charactersIn(tokenizeSet('reimu_hakurei'));
+    expect(hit.map((e) => e.tag), ['hakurei_reimu']);
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('charactersIn:多角色按热度降序,空输入零命中', () async {
+    final db = LocalTagDb();
+    final hit = await db.charactersIn(
+      tokenizeSet('hakurei_reimu, hatsune_miku, 1girl'),
+    );
+    expect(hit.map((e) => e.tag), ['hatsune_miku', 'hakurei_reimu']);
+    expect(hit.first.count, greaterThan(hit.last.count));
+    expect(await db.charactersIn(const {}), isEmpty);
+    expect(await db.charactersIn(tokenizeSet('1girl, solo')), isEmpty);
+  }, timeout: const Timeout(Duration(seconds: 60)));
 
   test('cacheTagMeta:译名等于标签本身不收,刻意排版过的专有名词照收', () {
     cacheTagMeta('rwby', trans: 'rwby');

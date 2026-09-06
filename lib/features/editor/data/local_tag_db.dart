@@ -4,10 +4,14 @@ import 'package:flutter/foundation.dart' show VoidCallback, compute;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/util/prompt_tokens.dart';
 import 'suggestions.dart';
 
 /// 顶层函数(compute 要求):在后台 isolate 解析整份 TSV。
-/// 行格式 `tag<TAB>post_count<TAB>中文<TAB>alias1,alias2`。
+/// 行格式 `tag<TAB>post_count<TAB>中文<TAB>alias1,alias2<TAB>category`。
+///
+/// 第 5 列 category 用 Danbooru 的类目编号,**目前只填了 4(角色)**,其余留空
+/// (= 未定类,不是「普通标签」)。建库时的来源与覆盖见 [LocalTagDb] 的类注释。
 List<_Entry> _parseTsv(String raw) {
   final list = <_Entry>[];
   for (final line in const LineSplitter().convert(raw)) {
@@ -26,7 +30,19 @@ List<_Entry> _parseTsv(String raw) {
               if (s.isNotEmpty && !s.startsWith('/')) s, // 去掉 /lh 之类快捷别名
           ]
         : const <String>[];
-    list.add(_Entry(f[0], count, zh, aliases));
+    // 角色的反查键在这里(isolate 里)就算好:提示词侧走同一个 [cleanPromptToken],
+    // 双边同归一才对得上(`ganyu_(genshin_impact)` 与 `ganyu (genshin impact)`
+    // 都归到 `ganyu genshin impact`)。非角色行不算 —— 九万行的正则不白跑。
+    final isChar = f.length > 4 && f[4] == '4';
+    list.add(
+      _Entry(
+        f[0],
+        count,
+        zh,
+        aliases,
+        charKey: isChar ? cleanPromptToken(f[0]) : null,
+      ),
+    );
   }
   return list;
 }
@@ -34,8 +50,18 @@ List<_Entry> _parseTsv(String raw) {
 /// 离线 Danbooru 标签库(`assets/danbooru.tsv`,**含中文翻译**,已按热度降序)。
 /// 用户在设置里显式选了「离线词库」时的英文补全走这里——**完全离线**,不碰网络,
 /// 天然绕开 Cloudflare。(2026-08-25 前它还是「未授权模式」的兜底,门禁解除后不再是。)
-/// 行格式(tab 分隔):`tag<TAB>post_count<TAB>中文<TAB>alias1,alias2`;
+/// 行格式(tab 分隔):`tag<TAB>post_count<TAB>中文<TAB>alias1,alias2<TAB>category`;
 /// tag 用下划线,app 内展示/插入转空格;中文来自社区词库(ChinaGPT 10w + byzod 精选合并)。
+///
+/// **category 列(2026-09-05 补)**:Danbooru 类目编号,目前只填 4(角色),
+/// 共 26,083 行(count≥50 的目标集里 23,983 行,占 26.3%)。来源是后端两份建库
+/// 产物的并集 —— `tags_enhanced.csv` 的 category=4(20,169)+
+/// `role_tag_mapping.json` 的 role_en(28,335);两者交叉验证 19,263 条**完全一致**,
+/// 所以并集可直接用。画师(类目 1)与 meta(5)**上游没有**,要另跑 Danbooru
+/// `tags.json?search[category]=1` 采集,本轮没做;作品(3)只有 `tags_enhanced`
+/// 那 5,225 条可信 —— `role_tag_mapping.origin_en` 抽样只有 71% 真是作品
+/// (19.7% 其实是普通标签、9.2% 是角色,`kantoku`/`rella` 这种画师限定符被误提升),
+/// 故未采用。空 category = **未定类**,不等于「普通标签」。
 class LocalTagDb {
   List<_Entry>? _entries;
   Future<void>? _loading;
@@ -192,14 +218,72 @@ class LocalTagDb {
     }
     return out;
   }
+
+  // ---- 角色反查(离线) ----
+
+  /// 归一化键 → 角色行。正名与别名同表,**正名优先**;别名之间撞车先到先得 ——
+  /// 词库按热度降序,赢的是更热门那个,与 [_warmTagMeta] 的口径一致。
+  Map<String, _Entry>? _charIdx;
+
+  Map<String, _Entry> _ensureCharIdx(List<_Entry> entries) {
+    final idx = _charIdx;
+    if (idx != null) return idx;
+    final out = <String, _Entry>{};
+    for (final e in entries) {
+      if (e.charKey != null) out[e.charKey!] = e;
+    }
+    // 别名遍:`reimu_hakurei` 也该认出博丽灵梦。正名已占的键不覆盖。
+    for (final e in entries) {
+      if (e.charKey == null) continue;
+      for (final a in e.aliases) {
+        out.putIfAbsent(cleanPromptToken(a), () => e);
+      }
+    }
+    return _charIdx = out;
+  }
+
+  /// 提示词分词集合 → 命中的角色标签,**按热度降序**(库本身即热度序)。
+  ///
+  /// 分词用 [tokenizeSet],与本表的键同走 [cleanPromptToken],下划线/括号/权重
+  /// 记号两边同归一。词库没加载好(读 asset 失败)时得空表,调用方按「没有角色」
+  /// 处理即可,不必区分。
+  Future<List<CharacterTag>> charactersIn(Set<String> tokens) async {
+    if (tokens.isEmpty) return const [];
+    try {
+      await _ensureLoaded();
+    } catch (_) {
+      return const [];
+    }
+    final entries = _entries;
+    if (entries == null) return const [];
+    final idx = _ensureCharIdx(entries);
+    // 遍历 tokens(几十个)查表,而不是遍历两万多个角色行
+    final hit = <_Entry>{};
+    for (final t in tokens) {
+      final e = idx[t];
+      if (e != null) hit.add(e);
+    }
+    if (hit.isEmpty) return const [];
+    final out = [
+      for (final e in hit) (tag: e.tag, zh: e.zh, count: e.count),
+    ];
+    out.sort((a, b) => b.count.compareTo(a.count));
+    return out;
+  }
 }
 
+/// 一枚命中的角色标签。[tag] 是词库正名(下划线形式),[zh] 可空。
+typedef CharacterTag = ({String tag, String? zh, int count});
+
 class _Entry {
-  _Entry(this.tag, this.count, this.zh, this.aliases);
+  _Entry(this.tag, this.count, this.zh, this.aliases, {this.charKey});
   final String tag;
   final int count;
   final String? zh; // 中文翻译(可空)
   final List<String> aliases;
+
+  /// 角色行的反查键(= `cleanPromptToken(tag)`);非角色为 null。
+  final String? charKey;
 }
 
 /// 全局单例(懒加载一次,常驻内存)。
