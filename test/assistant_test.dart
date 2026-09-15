@@ -7,7 +7,10 @@ import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
+import 'package:plana_app/core/net/agent_stream.dart';
 import 'package:plana_app/core/store/app_stores.dart';
 import 'package:plana_app/features/assistant/agent_model.dart';
 import 'package:plana_app/features/assistant/agent_trace.dart';
@@ -21,6 +24,8 @@ import 'package:plana_app/features/assistant/assistant_settings.dart';
 import 'package:plana_app/features/assistant/custom_endpoint.dart';
 import 'package:plana_app/features/assistant/custom_endpoint_api.dart';
 import 'package:plana_app/features/assistant/direct_agent.dart';
+import 'package:plana_app/features/assistant/local_library.dart';
+import 'package:plana_app/features/assistant/preset_rules.dart';
 import 'package:plana_app/features/assistant/prompt_diff.dart';
 import 'package:plana_app/features/assistant/assistant_state.dart';
 import 'package:plana_app/features/assistant/widgets/reply_body.dart';
@@ -1031,9 +1036,139 @@ void main() {
     });
   });
 
-  group('画师串占位符(自定义接口那条)', () {
+  group('本地资料:预匹配与资料块(自定义接口那条)', () {
+    // 判据与服务端逐条对齐,改的时候拿服务端那份跑同一批用例对照过
     const a1 = '[[artist:as109]],{{artist:wlop}},1.3::artist:hiten::';
-    const tokens = {'__ARTIST_A1__': a1, '__ARTIST_厚涂_风__': 'artist:rella'};
+    const d11 =
+        '<artist>\n2.4::harukui::,1.4::urotsuki_(ku9625)::\n</artist>\n\n'
+        '<style>\nthick paint, painterly,\ncel rendering,\n</style>,';
+    final artists = libArtistsOf([
+      {'id': 'A1', 'name': 'A1', 'prompt': a1},
+      {'id': 'D11', 'name': 'D11', 'prompt': d11},
+      {'id': '厚涂 风', 'name': '厚涂 风', 'prompt': 'thick paint'},
+      {'id': 'E5', 'name': 'E5', 'prompt': '   '},
+    ]);
+    final ocs = libOcsOf([
+      {
+        'en_name': 'OC_DeepSeek',
+        'zh_name': 'DeepSeek',
+        'zh_aliases': <String>[],
+        'tag_group': 'blue hair',
+      },
+      {
+        'en_name': 'local-1',
+        'zh_name': '小小纺',
+        'zh_aliases': ['阿纺'],
+        'tag_group': 'silver hair, twin braids',
+      },
+    ]);
+
+    test('编号不分大小写、名字去掉空白标点再比,没内容的条目不认', () {
+      expect(matchArtists('a1 和厚涂风,还有 e5', artists), [
+        ('A1', a1),
+        ('厚涂 风', 'thick paint'),
+      ]);
+      // 名字规范化后只有 1 个字的不按名字认:在任何一句话里都能撞上
+      final single = libArtistsOf([
+        {'id': '风', 'name': '风', 'prompt': 'artist:wind'},
+      ]);
+      expect(matchArtists('画一张风景', single), isEmpty);
+    });
+
+    test('OC 认中文名、别名和去掉 OC_ 的键名,命中的名字越长越靠前', () {
+      // DeepSeek 8 个字排在「小小纺」3 个字前面;同一个 OC 命中的名字按库里的顺序连起来
+      expect(matchOcs('阿纺、小小纺和 deep seek', ocs), [
+        ('DeepSeek', 'blue hair'),
+        ('小小纺、阿纺', 'silver hair, twin braids'),
+      ]);
+    });
+
+    test('资料块:画师串只给占位符,多行内容一行都不漏;OC 给完整 tag 组', () {
+      final pre = buildLocalPrequery(
+        text: '用 D11 画小小纺',
+        artists: artists,
+        ocs: ocs,
+        remembered: const {},
+        roleBlock: '[角色候选]\nflandre_scarlet → 中文: 芙兰',
+      );
+      expect(
+        pre.block,
+        '[画师串]\n$kArtistBlockNote\nD11 → __ARTIST_D11__\n\n'
+        '[OC 角色]\n小小纺 → silver hair, twin braids\n\n'
+        '[角色候选]\nflandre_scarlet → 中文: 芙兰',
+      );
+      expect(pre.thisTurn['artist'], {'D11': d11});
+      expect(pre.plan.tokens, {'__ARTIST_D11__': d11});
+    });
+
+    test('这轮没点到的那类用账本补上;账本里记着的画师串都进映射', () {
+      final pre = buildLocalPrequery(
+        text: '换个姿势',
+        artists: artists,
+        ocs: ocs,
+        remembered: {
+          'artist': {'A1': a1},
+          'oc': {'小小纺': 'silver hair, twin braids'},
+        },
+      );
+      expect(pre.block, contains('A1 → __ARTIST_A1__'));
+      expect(pre.block, contains('[OC 角色]\n小小纺 → silver hair, twin braids'));
+      expect(pre.thisTurn['artist'], isEmpty, reason: '补上的不算本轮命中');
+      final none = buildLocalPrequery(
+        text: '用 D11',
+        artists: artists,
+        ocs: ocs,
+        remembered: {
+          'artist': {'A1': a1},
+        },
+        useLibrary: false,
+      );
+      expect(none.block, isEmpty, reason: '「不使用」时不匹配也不补');
+      expect(none.plan.tokens, {'__ARTIST_A1__': a1}, reason: '历史里的串照样要折');
+    });
+
+    test('公共库命中的排在本地后面,同名以本地为准', () {
+      final pre = buildLocalPrequery(
+        text: '用 A1',
+        artists: artists,
+        ocs: ocs,
+        remembered: const {},
+        publicArtists: const {'a1': 'artist:public', 'Z9': 'artist:z9'},
+      );
+      expect(pre.thisTurn['artist'], {'A1': a1, 'Z9': 'artist:z9'});
+    });
+
+    test('旧账本里只记下第一行的多行画师串,按本地库补全', () {
+      final healed = healRememberedArtists({
+        'artist': {'D11': '<artist>', 'A1': 'artist:old'},
+      }, artists);
+      expect(healed['artist'], {'D11': d11, 'A1': 'artist:old'});
+    });
+
+    test('服务端的环境块里只挑角色候选那块,块里的空行不算分界', () {
+      const env =
+          '[画师串]\nZ9 → artist:z9\n\n[角色候选]\nflandre_scarlet → 中文: 芙兰\n\n'
+          'remilia → 中文: 蕾米\n\n[OC 角色]\nx → y';
+      expect(
+        pickBlock(env, kRoleBlock),
+        '[角色候选]\nflandre_scarlet → 中文: 芙兰\n\nremilia → 中文: 蕾米',
+      );
+    });
+
+    test('条件段:用户原话、画布、历史里任一段像在画漫画', () {
+      expect(detectPromptModes(['画个四格漫画']), ['comic']);
+      expect(detectPromptModes(['第三格改成笑']), ['comic']);
+      expect(detectPromptModes(['manga style girl', '普通立绘']), isEmpty);
+    });
+  });
+
+  group('本地资料:占位符还原与账本', () {
+    const a1 = '[[artist:as109]],{{artist:wlop}},1.3::artist:hiten::';
+    final artists = libArtistsOf([
+      {'id': 'A1', 'name': 'A1', 'prompt': a1},
+      {'id': '厚涂 风', 'name': '厚涂 风', 'prompt': 'artist:rella'},
+    ]);
+    const tokens = {'__ARTIST_A1__': a1};
 
     test('画布和历史里逐字相同的画师串折成占位符,改过的不动', () {
       expect(
@@ -1044,33 +1179,317 @@ void main() {
       expect(collapseArtistStrings(edited, tokens), edited);
     });
 
-    test('服务端没还原成时本地兜底:认得的换回,写歪的也认,认不出的删掉', () {
+    test('认得的逐字换回(权重包着也行、写歪了也认),认不出的连逗号和空壳一起删', () {
+      final plan = ArtistPlan()..add('A1', a1);
+      final resolve = artistResolver(plan, artists);
       expect(
-        expandArtistTokens('1.2::__ARTIST_A1__::, 1girl', tokens),
+        expandArtistText('1.2::__ARTIST_A1__::, 1girl', resolve).text,
         '1.2::$a1::, 1girl',
       );
-      expect(
-        expandArtistTokens('__artist_a1__, __ARTIST_厚涂_风__, smile', tokens),
-        '$a1, artist:rella, smile',
+      final r = expandArtistText(
+        '__artist_a1__, __ARTIST_A1__, {__ARTIST_Z9__}, 0.8::__ARTIST_C3__::, 1girl',
+        resolve,
       );
-      expect(expandArtistTokens('__ARTIST_C3__, 1girl', tokens), '1girl');
-      expect(expandArtistTokens('1girl, smile', tokens), '1girl, smile');
+      expect(r.text, '$a1, 1girl');
+      expect(r.used, ['A1']);
+      expect(r.notes, hasLength(2));
     });
 
-    test('正文里的占位符换成名字', () {
-      expect(artistTokensToNames('用了 __ARTIST_A1__ 的画风'), '用了 A1 的画风');
-    });
-
-    test('本地库的画师按服务端同一种起名列出来,兜底能认工具查到的本地画师', () {
-      final lib = libraryArtistTokens([
-        {'id': '厚涂 风', 'name': '厚涂 风', 'prompt': 'artist:rella'},
-        {'id': 'B2', 'name': 'B2', 'prompt': ''},
-      ]);
-      expect(lib, {'__ARTIST_厚涂_风__': 'artist:rella'});
+    test('模型自己又抄了一遍完整串的,只删占位符', () {
+      final resolve = artistResolver(ArtistPlan()..add('A1', a1), artists);
       expect(
-        expandArtistTokens('__ARTIST_厚涂_风__, 1girl', lib),
+        expandArtistText('__ARTIST_A1__, $a1, 1girl', resolve).text,
+        '$a1, 1girl',
+      );
+    });
+
+    test('映射里没有的去本地库查,查到的记进映射', () {
+      final plan = ArtistPlan();
+      final resolve = artistResolver(plan, artists);
+      expect(
+        expandArtistText('__ARTIST_厚涂_风__, 1girl', resolve).text,
         'artist:rella, 1girl',
       );
+      expect(plan.tokens, {'__ARTIST_厚涂_风__': 'artist:rella'});
+      expect(
+        namesInReply('用了 __ARTIST_厚涂_风__ 和 __ARTIST_Q1__', resolve),
+        '用了 厚涂 风 和 Q1',
+      );
+    });
+
+    test('工具查到的画师串记进映射,按它返回的 placeholder 认', () {
+      final plan = ArtistPlan();
+      final hits = searchLocalArtists(artists, {
+        'artist_ids': ['a1'],
+      });
+      expect(hits.single['placeholder'], '__ARTIST_A1__');
+      rememberToolArtists(plan, hits);
+      rememberToolArtists(plan, [
+        {'id': 'P1', 'name': 'P1', 'prompt': 'artist:public'},
+      ]);
+      expect(plan.tokens, {
+        '__ARTIST_A1__': a1,
+        '__ARTIST_P1__': 'artist:public',
+      });
+    });
+
+    test('还在不在用:整串原样在,或者规范化后命中两枚以上的 tag', () {
+      expect(
+        resourceStillInUse('1.2::mika_pikazo::, ask_\\(askzy\\)', {
+          'positive': 'mika pikazo, 1.4::ask (askzy)::',
+        }),
+        isTrue,
+      );
+      expect(
+        resourceStillInUse('silver hair, twin braids, purple eyes', {
+          'positive': 'a girl with silver hair and purple eyes',
+        }),
+        isTrue,
+      );
+      expect(
+        resourceStillInUse('银发, 双马尾', {
+          'positive': '1girl',
+          'characters': [
+            {'positive': '银发少女'},
+          ],
+        }),
+        isFalse,
+      );
+    });
+
+    test('收尾记账:本轮 ∪ 记着的,出了图才按画面筛', () {
+      const remembered = {
+        'artist': {'A1': a1, 'Q9': 'artist:gone'},
+      };
+      const thisTurn = {
+        'oc': {'小小纺': 'silver hair, twin braids'},
+      };
+      expect(mergeLedger(remembered, thisTurn, null), {
+        'artist': {'A1': a1, 'Q9': 'artist:gone'},
+        'oc': {'小小纺': 'silver hair, twin braids'},
+      });
+      expect(
+        mergeLedger(remembered, thisTurn, {
+          'positive': '$a1, 1girl',
+          'characters': [
+            {'positive': 'silver hair, twin braids, smile'},
+          ],
+        }),
+        {
+          'artist': {'A1': a1},
+          'oc': {'小小纺': 'silver hair, twin braids'},
+        },
+      );
+    });
+
+    test('查本地库的工具:按编号 / 关键词找画师串,OC 按名字找', () {
+      expect(
+        searchLocalArtists(artists, {'keyword': 'RELLA'}).single['id'],
+        '厚涂 风',
+      );
+      expect(searchLocalArtists(artists, {'keyword': '  '}), isEmpty);
+      final ocs = searchLocalOcs(
+        libOcsOf([
+          {
+            'en_name': 'OC_DeepSeek',
+            'zh_name': 'DeepSeek',
+            'zh_aliases': ['深度求索'],
+            'tag_group': 'blue hair',
+          },
+        ]),
+        {'query': 'deep seek'},
+      );
+      expect(ocs.single['source'], 'oc');
+      expect(ocs.single['tags'], 'blue hair');
+      expect(ocs.single['zh_aliases'], ['DeepSeek', '深度求索']);
+    });
+  });
+
+  group('自定义接口:本地库不出本机', () {
+    const d11 = '<artist>\n1.2::harukui::,\n</artist>\n\n<style>\nthick paint,\n</style>,';
+    const a1 = '[[artist:as109]],{{artist:wlop}}';
+    const endpoint = CustomEndpoint(
+      id: 'e',
+      name: 'e',
+      format: AgentApiFormat.openai,
+      baseUrl: 'https://llm.test',
+      apiKey: 'k',
+      model: 'm',
+    );
+    final library = (
+      artists: [
+        {'id': 'D11', 'name': 'D11', 'prompt': d11},
+        {'id': 'B7', 'name': 'B7', 'prompt': 'artist:rella'},
+      ],
+      ocs: [
+        {
+          'en_name': 'local-1',
+          'zh_name': '小小纺',
+          'zh_aliases': <String>[],
+          'tag_group': 'silver hair, twin braids',
+        },
+      ],
+    );
+
+    http.Response json(Object body) => http.Response(
+      jsonEncode(body),
+      200,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+
+    http.Response modelSays(String text) => json({
+      'choices': [
+        {
+          'message': {'content': text},
+        },
+      ],
+    });
+
+    Future<List<AgentEvent>> run(
+      MockClient mock, {
+      required String scope,
+      String userRequest = '用 D11 画小小纺',
+    }) => http.runWithClient(
+      () => streamDirectPrompt(
+        endpoint: endpoint,
+        backendBase: 'https://plana.test',
+        sessionId: '',
+        userRequest: userRequest,
+        rules: const [PresetRule(name: 'role', content: '你是画师')],
+        canvasBlock: '[当前画面提示词]\npositive: $a1, 1girl',
+        history: const [
+          {'role': 'user', 'content': '上一轮'},
+          {'role': 'assistant', 'content': 'positive: $a1'},
+        ],
+        webArtists: library.artists,
+        webOcs: library.ocs,
+        resources: const {
+          'artist': {'A1': a1},
+        },
+        libraryScope: scope,
+      ).toList(),
+      () => mock,
+    );
+
+    test('发给后端的只有这句话;匹配、查库、还原、记账都在本地', () async {
+      final backend = <http.Request>[];
+      final model = <String>[];
+      final mock = MockClient((req) async {
+        if (req.url.host == 'llm.test') {
+          model.add(req.body);
+          return modelSays(
+            model.length == 1
+                ? '```tool_call\n{"name": "search_artist", "arguments": {"artist_ids": ["B7"]}}\n```'
+                : '用 __ARTIST_D11__ 和 __ARTIST_B7__ 画好了\n```nai_draw\n'
+                      '{"positive": "1.2::__ARTIST_D11__::, __ARTIST_B7__, 1girl, silver hair, twin braids", '
+                      '"negative": "", "characters": []}\n```',
+          );
+        }
+        backend.add(req);
+        return switch (req.url.path) {
+          '/api/agent/tools' => json({'block': '[可用工具]'}),
+          '/api/agent/prequery' => json({
+            'block': '[角色候选]\nflandre_scarlet → 中文: 芙兰',
+            'this_turn': <String, Object>{},
+            'modes': <String>[],
+          }),
+          _ => http.Response('{}', 404),
+        };
+      });
+
+      final events = await run(mock, scope: 'local');
+
+      expect(backend.map((r) => r.url.path), [
+        '/api/agent/tools',
+        '/api/agent/prequery',
+      ], reason: '查库工具、还原、记账都不打后端');
+      final prequery = backend.firstWhere(
+        (r) => r.url.path == '/api/agent/prequery',
+      );
+      expect(jsonDecode(prequery.body), {
+        'user_request': '用 D11 画小小纺',
+        'library_scope': 'local',
+      });
+      for (final r in backend) {
+        for (final leaked in ['harukui', 'rella', 'twin braids', 'as109']) {
+          expect(r.body, isNot(contains(leaked)), reason: '${r.url.path} 带了库内容');
+        }
+      }
+
+      expect(model.first, contains('D11 → __ARTIST_D11__'));
+      expect(model.first, contains('小小纺 → silver hair, twin braids'));
+      expect(model.first, contains('[角色候选]'));
+      expect(model.first, isNot(contains('harukui')));
+      expect(model.first, isNot(contains('as109')), reason: '画布、历史里的串折成占位符');
+      expect(model.last, contains('__ARTIST_B7__'), reason: '工具结果回灌');
+
+      final done = events.whereType<AgentDone>().single.result;
+      expect(
+        done.positive,
+        '1.2::$d11::, artist:rella, 1girl, silver hair, twin braids',
+      );
+      expect(done.replyText, '用 D11 和 B7 画好了');
+      expect(done.resources, {
+        'artist': {'D11': d11},
+        'oc': {'小小纺': 'silver hair, twin braids'},
+      });
+    });
+
+    test('「+ 公共库」:公共库命中的接在本地后面,工具的服务端那半只发参数', () async {
+      final backend = <http.Request>[];
+      final model = <String>[];
+      final mock = MockClient((req) async {
+        if (req.url.host == 'llm.test') {
+          model.add(req.body);
+          return modelSays(
+            model.length == 1
+                ? '```tool_call\n{"name": "search_character", "arguments": {"query": "小小纺"}}\n```'
+                : '好',
+          );
+        }
+        backend.add(req);
+        return switch (req.url.path) {
+          '/api/agent/tools' => json({'block': ''}),
+          '/api/agent/prequery' => json({
+            'block': '[画师串]\nZ9 → artist:z9',
+            'this_turn': {
+              'artist': {'Z9': 'artist:z9'},
+            },
+          }),
+          '/api/agent/tools/call' => json({
+            'result': [
+              {'name': 'xiao_(game)', 'tags': 'xiao_(game)', 'source': 'roleTag'},
+            ],
+          }),
+          _ => http.Response('{}', 404),
+        };
+      });
+
+      await run(mock, scope: 'all', userRequest: '用 D11 和 Z9 画小小纺');
+
+      // 请求体是 JSON,换行在里面是转义过的
+      expect(model.first, contains(r'D11 → __ARTIST_D11__\nZ9 → __ARTIST_Z9__'));
+      final call = backend.firstWhere((r) => r.url.path == '/api/agent/tools/call');
+      expect(jsonDecode(call.body), {
+        'name': 'search_character',
+        'arguments': {'query': '小小纺'},
+        'library_scope': 'all',
+      });
+      final result = model.last.indexOf('"source\\":\\"oc\\"');
+      final role = model.last.indexOf('xiao_(game)');
+      expect(result, greaterThan(-1));
+      expect(role, greaterThan(result), reason: '本地 OC 排在角色库前面');
+    });
+
+    test('「不使用」:连预匹配都不打', () async {
+      final paths = <String>[];
+      final mock = MockClient((req) async {
+        if (req.url.host == 'llm.test') return modelSays('好');
+        paths.add(req.url.path);
+        return json({'block': ''});
+      });
+      await run(mock, scope: 'none');
+      expect(paths, ['/api/agent/tools']);
     });
   });
 

@@ -564,9 +564,10 @@ class AssistantNotifier extends Notifier<AssistantState> {
             // 直连没有独立的「当前画面」通道,画布当一段文本发过去
             canvasBlock: canvas ? _canvasBlock(g) : '',
             history: history,
+            // 库只在本机用:预匹配、占位符、记账、查库工具都在 app 里做,
+            // 不发给后端(见 local_library.dart)
             webArtists: lib.artists,
             webOcs: lib.ocs,
-            // 预匹配与记账同样打后端(见 direct_agent 头注释),规则一份
             resources: latestResources(state.msgs),
             libraryScope: libraryScopeWire(scope),
             chosenModes: modeKeys,
