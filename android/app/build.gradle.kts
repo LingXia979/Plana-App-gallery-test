@@ -63,6 +63,12 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            // ONNX Runtime 的 JNI 按类名字符串反查 Java 类,被 R8 改名后
+            // 进程级 abort。规则见 proguard-rules.pro。
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 
@@ -91,6 +97,12 @@ android {
                 "lib/x86_64/**",
             )
         }
+    }
+
+    // 离线词库索引(assets/danbooru.tagidx,近 10MB)不压缩:引擎读压缩过的 asset
+    // 会在 UI 线程上整份解压,不压缩则直接 mmap。见 lib/features/editor/data/local_tag_db.dart。
+    androidResources {
+        noCompress += "tagidx"
     }
 }
 

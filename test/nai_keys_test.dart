@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:plana_app/core/auth/nai_keys.dart';
 import 'package:plana_app/core/auth/token_store.dart';
+import 'package:plana_app/core/net/nai_endpoint.dart';
 
 ProviderContainer _container() {
   final c = ProviderContainer();
@@ -75,6 +76,45 @@ void main() {
     });
   });
 
+  group('接口地址跟着每把走', () {
+    test('同一串 key 填两个地址 = 两把:那是两台机器上的两个账号', () async {
+      final s = await _store(_container());
+      final a = await s.add('same-key', endpoint: 'https://relay.a.com');
+      final b = await s.add('same-key', endpoint: 'https://relay.b.com/');
+      expect(a!.id, isNot(b!.id));
+      expect(b.endpoint, 'https://relay.b.com', reason: '尾斜杠要归一掉');
+
+      // 同地址再加一次才是同一把
+      final again = await s.add('same-key', endpoint: 'https://relay.a.com');
+      expect(again!.id, a.id);
+      expect((await s.future).length, 2);
+    });
+
+    test('官方那把不落地址字段,落盘再读回来还是官方', () async {
+      final c = _container();
+      final s = await _store(c);
+      await s.add('pst-official');
+      await s.add('third-key', endpoint: 'https://relay.example.com');
+      final raw = await const FlutterSecureStorage().read(
+        key: 'nai_access_keys',
+      );
+      expect(raw, isNot(contains('"ep":"https://image.novelai.net"')));
+
+      final back = await _container().read(naiKeysStoreProvider.future);
+      expect(back[0].endpoint, '');
+      expect(back[0].isThirdParty, isFalse);
+      expect(back[1].endpoint, 'https://relay.example.com');
+      expect(back[1].isThirdParty, isTrue);
+    });
+
+    test('填成官方地址本身 = 官方,不算第三方', () async {
+      final s = await _store(_container());
+      final k = await s.add('tok', endpoint: '$kNaiOfficialBase/');
+      expect(k!.endpoint, '');
+      expect(k.isThirdParty, isFalse);
+    });
+  });
+
   group('增删改', () {
     test('add 追加;第一把自动成为主账号', () async {
       final c = _container();
@@ -99,7 +139,7 @@ void main() {
       expect(again.accessKey, 'ak'); // 补上了凭证
     });
 
-    test('满 8 把之后加不进去(返回 null)', () async {
+    test('存满之后加不进去(返回 null)', () async {
       final c = _container();
       final s = await _store(c);
       for (var i = 0; i < kMaxNaiKeys; i++) {
@@ -124,6 +164,55 @@ void main() {
       expect([for (final k in now) k.token], ['a', 'b', 'c']);
       expect([for (final k in now) k.primary], [false, false, true]);
       expect(naiPrimaryKey(now)!.token, 'c');
+    });
+
+    // 拖动排序改的是列表顺序,主账号标记跟着那把 Key 走 —— 拖动不该换人。
+    test('reorder 挪位置,主账号跟着那把 Key 走', () async {
+      final c = _container();
+      final s = await _store(c);
+      await s.add('a');
+      await s.add('b');
+      await s.add('c');
+      await s.makePrimary(c.read(naiKeysStoreProvider).value![2].id);
+
+      await s.reorder(2, 0); // c 拖到首位
+      final now = c.read(naiKeysStoreProvider).value!;
+      expect([for (final k in now) k.token], ['c', 'a', 'b']);
+      expect(naiPrimaryKey(now)!.token, 'c');
+
+      await s.reorder(0, 2); // 再拖回末位
+      final back = c.read(naiKeysStoreProvider).value!;
+      expect([for (final k in back) k.token], ['a', 'b', 'c']);
+      expect(naiPrimaryKey(back)!.token, 'c');
+    });
+
+    // 越界/原地不动的下标不该把列表搅乱,更不该抛。
+    test('reorder 下标越界或原地不动:列表不变', () async {
+      final c = _container();
+      final s = await _store(c);
+      await s.add('a');
+      await s.add('b');
+
+      for (final (from, to) in const [(0, 0), (-1, 1), (0, 5), (9, 0)]) {
+        await s.reorder(from, to);
+        expect(
+          [for (final k in c.read(naiKeysStoreProvider).value!) k.token],
+          ['a', 'b'],
+        );
+      }
+    });
+
+    // 顺序落盘了才算数:重启回来还得是拖好的那个顺序。
+    test('reorder 的顺序会落盘', () async {
+      final c = _container();
+      final s = await _store(c);
+      await s.add('a');
+      await s.add('b');
+      await s.add('c');
+      await s.reorder(0, 2);
+
+      final again = await _container().read(naiKeysStoreProvider.future);
+      expect([for (final k in again) k.token], ['b', 'c', 'a']);
     });
 
     // 出图顺序才认主账号:它排头,其余按列表顺序。

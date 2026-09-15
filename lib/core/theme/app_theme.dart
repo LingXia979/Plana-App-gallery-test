@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:material_color_utilities/material_color_utilities.dart'
     show Hct, SchemeTonalSpot;
 
+import '../ui/slide_back_transitions.dart';
+
 /// 全局主题。当前阶段按用户要求使用 M3 默认配色(基准种子色),
 /// 组件一律走语义角色(primary/surfaceContainer* 等),
 /// 将来切 NAI 品牌皮肤时只需替换这里的 ColorScheme。
@@ -42,6 +44,11 @@ abstract final class AppTheme {
       ),
       snackBarTheme: const SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
+      ),
+      // 二级页左右滑动,不跟手(见 SlideBackPageTransitionsBuilder)。
+      // 默认那套预测性返回松手后页面直接消失,和进场动画接不上。
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {TargetPlatform.android: SlideBackPageTransitionsBuilder()},
       ),
     );
   }
@@ -103,6 +110,9 @@ abstract final class FixedSemantic {
 
   /// 重绘(图库角标)
   static const inpaint = Color(0xFF7E57C2);
+
+  /// 打码(图库角标)。与重绘同为「派生品」,取冷灰蓝拉开区分。
+  static const censor = Color(0xFF546E7A);
 }
 
 /// 便捷访问

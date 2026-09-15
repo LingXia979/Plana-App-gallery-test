@@ -137,7 +137,11 @@ class _AnnotatedFieldState extends State<AnnotatedField> {
 
     return SingleChildScrollView(
       controller: widget.scrollController,
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
+      // 一屏放得下也照样接拖动:编辑页滚动收起顶栏后,靠「顶上往下拽」
+      // 放出来(见 ChromeScrollTracker)
+      physics: const AlwaysScrollableScrollPhysics(),
+      // 顶部只留 2:第一行 2 倍行高自带约 6 的上半行距,再多就和顶栏隔得太开
+      padding: const EdgeInsets.fromLTRB(16, 2, 16, 24),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final width = constraints.maxWidth;

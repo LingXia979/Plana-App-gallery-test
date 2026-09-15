@@ -31,6 +31,16 @@ String stripInlineTags(String input) {
 String _jsNum(double v) =>
     v == v.roundToDouble() ? v.toInt().toString() : v.toString();
 
+/// 拼 NAI 数值权重 `w::内容::`。
+///
+/// 内容以数字结尾时在收口前补一个空格:`year 2025::` 里的 `2025::` 长得和
+/// 权重前缀一模一样,NAI 会把它读成「从这里起权重 2025」,得写成 `year 2025 ::`。
+String naiNumWeight(String weight, String content) {
+  final last = content.isEmpty ? 0 : content.codeUnitAt(content.length - 1);
+  final pad = last >= 0x30 && last <= 0x39 ? ' ' : '';
+  return '$weight::$content$pad::';
+}
+
 final _numRe = RegExp(r'^\s*-?\d+(?:\.\d+)?\s*$');
 
 String convertSdToNai(String text) {
@@ -70,7 +80,7 @@ String convertSdToNai(String text) {
                 (weight - 0.95).abs() < 0.001) {
               res.write('[$content]');
             } else {
-              res.write('${_jsNum(weight)}::$content::');
+              res.write(naiNumWeight(_jsNum(weight), content));
             }
             i = j;
             continue;

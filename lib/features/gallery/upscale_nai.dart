@@ -56,17 +56,19 @@ Future<({Uint8List png, int width, int height})> upscaleNai(
     out = base64Decode(r.imageBase64!);
   } else {
     onStage?.call('上传 NAI…');
-    final client = ref.read(naiClientProvider);
     // 占一个直连槽再打:超分和生成花的是同一个账号、撞的是同一个限流桶。
     // 不占的话「生成中顺手点一次超分」必 429(NAI 同 Key 不许并发)。
     //
     // paid:超分一定扣点(按源图像素 1–4 点),所以关了「使用点数」的 Key
     // 不参与 —— 白嫖号的点数不该被超分悄悄花掉。用哪把由闸门定。
-    out = await ref.read(naiGateProvider).run(paid: true, (token) {
+    // 打哪台机器跟着闸门给的那把 Key 走(第三方的 key 只在它自己那台上有效)。
+    out = await ref.read(naiGateProvider).run(paid: true, (token, base) {
       if (token == null || token.isEmpty) {
         throw Exception('没有可用于付费操作的 NAI Token');
       }
-      return client.upscaleV5(token: token, imageBase64: b64);
+      return ref
+          .read(naiClientProvider(base))
+          .upscaleV5(token: token, imageBase64: b64);
     });
     onStage?.call('接收结果…');
     // 本机记账(bot 模式由服务端记):按**源图**像素查表 1–4 点。

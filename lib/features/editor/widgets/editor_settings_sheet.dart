@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/theme/app_theme.dart';
+import '../../../core/ui/setting_row.dart';
 import '../editor_settings.dart';
-import '../../../core/util/haptics.dart';
-import 'tag_panel.dart' show RepeatBtn;
 
 /// 编辑器设置弹层:行为开关 + 档位选择 + 加减调节,改动即时生效并持久化。
 /// 按模块分组;子项跟随所属功能开关置灰(补全关了实体/逗号无意义)。
@@ -97,8 +96,8 @@ class EditorSettingsSheet extends ConsumerWidget {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _sectionLabel(context, '显示'),
-                    _SettingRow(
+                    settingSection(context, '显示'),
+                    SettingRow(
                       icon: Icons.translate,
                       title: '显示注释翻译',
                       desc: '在词条下方以小字标注中文翻译',
@@ -106,7 +105,7 @@ class EditorSettingsSheet extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.patch((c) => c.copyWith(showTranslation: v)),
                     ),
-                    _SettingRow(
+                    SettingRow(
                       icon: Icons.format_color_fill,
                       title: '权重高亮',
                       desc: '加权 / 降权词条按强度显示红 / 蓝色',
@@ -114,7 +113,7 @@ class EditorSettingsSheet extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.patch((c) => c.copyWith(showWeightWash: v)),
                     ),
-                    _StepperRow(
+                    SettingStepperRow(
                       icon: Icons.format_size,
                       title: '文本字号',
                       desc: '文本模式下的文本显示大小',
@@ -126,7 +125,7 @@ class EditorSettingsSheet extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.patch((c) => c.copyWith(fontSize: v)),
                     ),
-                    _StepperRow(
+                    SettingStepperRow(
                       icon: Icons.label_outline,
                       title: '芯片字号',
                       desc: '芯片模式下的芯片显示大小',
@@ -138,8 +137,8 @@ class EditorSettingsSheet extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.patch((c) => c.copyWith(chipFontSize: v)),
                     ),
-                    _sectionLabel(context, '补全'),
-                    _SettingRow(
+                    settingSection(context, '补全'),
+                    SettingRow(
                       icon: Icons.manage_search,
                       title: '启用补全提示',
                       desc: '输入时在底部给出标签补全建议',
@@ -148,7 +147,7 @@ class EditorSettingsSheet extends ConsumerWidget {
                         (c) => c.copyWith(enableCompletion: v),
                       ),
                     ),
-                    _SettingRow(
+                    SettingRow(
                       icon: Icons.category_outlined,
                       title: '实体建议',
                       desc: '补全中包含画师 / 角色 / OC / 作品',
@@ -157,7 +156,7 @@ class EditorSettingsSheet extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.patch((c) => c.copyWith(entitySuggest: v)),
                     ),
-                    _SettingRow(
+                    SettingRow(
                       icon: Icons.auto_fix_high,
                       title: '选词自动补逗号',
                       desc: '选中补全后自动加「, 」,方便连打下一枚',
@@ -166,8 +165,8 @@ class EditorSettingsSheet extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.patch((c) => c.copyWith(autoComma: v)),
                     ),
-                    _sectionLabel(context, '词条栏'),
-                    _SettingRow(
+                    settingSection(context, '词条栏'),
+                    SettingRow(
                       icon: Icons.sell_outlined,
                       title: '启用标签面板',
                       desc: '光标停在词条上时显示权重与操作栏',
@@ -175,7 +174,7 @@ class EditorSettingsSheet extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.patch((c) => c.copyWith(enableTagPanel: v)),
                     ),
-                    _SettingRow(
+                    SettingRow(
                       icon: Icons.density_small,
                       title: '精简词条栏',
                       desc: '压成一行,只留权重与删除,正文多露两行',
@@ -184,7 +183,7 @@ class EditorSettingsSheet extends ConsumerWidget {
                       onChanged: (v) =>
                           notifier.patch((c) => c.copyWith(compactTagPanel: v)),
                     ),
-                    _StepperRow(
+                    SettingStepperRow(
                       icon: Icons.exposure,
                       title: '权重步进',
                       desc: '数值 +/− 每步的调整量',
@@ -206,73 +205,6 @@ class EditorSettingsSheet extends ConsumerWidget {
       ),
     );
   }
-
-  Widget _sectionLabel(BuildContext context, String text) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 2),
-      child: Text(
-        text,
-        style: context.texts.labelSmall!.copyWith(
-          color: context.scheme.primary,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-}
-
-/// 单行开关:整行可点,图标随开关着色;[enabled]=false 时整行淡显不可点。
-class _SettingRow extends StatelessWidget {
-  const _SettingRow({
-    required this.icon,
-    required this.title,
-    required this.desc,
-    required this.value,
-    required this.onChanged,
-    this.enabled = true,
-  });
-
-  final IconData icon;
-  final String title;
-  final String desc;
-  final bool value;
-  final bool enabled;
-  final ValueChanged<bool> onChanged;
-
-  void _flip(bool v) {
-    Haptics.selection();
-    onChanged(v);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = context.scheme;
-    return InkWell(
-      onTap: enabled ? () => _flip(!value) : null,
-      child: AnimatedOpacity(
-        duration: Motion.fast,
-        opacity: enabled ? 1 : .42,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 14, 8),
-          child: Row(
-            children: [
-              Icon(
-                icon,
-                size: 20,
-                color: value ? scheme.primary : scheme.outline,
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: _RowTexts(title: title, desc: desc),
-              ),
-              const SizedBox(width: 8),
-              Switch(value: value, onChanged: enabled ? _flip : null),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 /// 权重步进读数:两位小数去掉尾随的零(0.10 → 0.1,0.05 原样)。
@@ -284,126 +216,4 @@ String _fmtStep(double v) {
     if (t.endsWith('.')) t = t.substring(0, t.length - 1);
   }
   return t;
-}
-
-/// 加减调节行:左边图标+标题,右边一组 `− 读数 +`。
-///
-/// 为什么不是档位:字号、权重步进这类偏好没有天然的"三五个正确值" ——
-/// 屏幕尺寸、视力、习惯的加权幅度各不相同,给了三档总有人卡在两档之间。
-/// 按钮支持长按连发([RepeatBtn]),大范围也不用点几十下。
-class _StepperRow extends StatelessWidget {
-  const _StepperRow({
-    required this.icon,
-    required this.title,
-    required this.desc,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.step,
-    required this.format,
-    required this.onChanged,
-    this.enabled = true,
-  });
-
-  final IconData icon;
-  final String title;
-  final String desc;
-  final double value;
-  final double min;
-  final double max;
-  final double step;
-
-  /// 读数怎么写(字号取整、步进去尾零)。
-  final String Function(double) format;
-
-  final bool enabled;
-  final ValueChanged<double> onChanged;
-
-  /// 按整数格数走再落回实数:直接 `value += step` 累加浮点误差,连点几十下
-  /// 就会漂成 0.30000000000000004 这种,存进设置里再读出来更难看。
-  void _bump(int dir) {
-    final ticks = (value / step).round() + dir;
-    final next = (ticks * step).clamp(min, max).toDouble();
-    // 再夹一次到步长网格上,顺便把二进制小数的零头抹掉
-    final snapped = double.parse(next.toStringAsFixed(4));
-    if (snapped == value) return;
-    Haptics.selection();
-    onChanged(snapped);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = context.scheme;
-    return AnimatedOpacity(
-      duration: Motion.fast,
-      opacity: enabled ? 1 : .42,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 10, 16, 10),
-        child: Row(
-          children: [
-            Icon(icon, size: 20, color: scheme.primary),
-            const SizedBox(width: 14),
-            Expanded(
-              child: _RowTexts(title: title, desc: desc),
-            ),
-            const SizedBox(width: 8),
-            IgnorePointer(
-              ignoring: !enabled,
-              child: Row(
-                children: [
-                  RepeatBtn(
-                    icon: Icons.remove,
-                    size: 32,
-                    enabled: enabled && value > min,
-                    step: () => _bump(-1),
-                  ),
-                  SizedBox(
-                    width: 52,
-                    child: Text(
-                      format(value),
-                      textAlign: TextAlign.center,
-                      style: mono(context, size: 15, weight: FontWeight.w700),
-                    ),
-                  ),
-                  RepeatBtn(
-                    icon: Icons.add,
-                    size: 32,
-                    enabled: enabled && value < max,
-                    step: () => _bump(1),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _RowTexts extends StatelessWidget {
-  const _RowTexts({required this.title, required this.desc});
-
-  final String title;
-  final String desc;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          title,
-          style: context.texts.bodyLarge!.copyWith(fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          desc,
-          style: context.texts.labelSmall!.copyWith(
-            color: context.scheme.outline,
-          ),
-        ),
-      ],
-    );
-  }
 }

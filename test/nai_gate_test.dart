@@ -227,12 +227,12 @@ void main() {
       final gate = _gate(_plain(1));
 
       await expectLater(
-        gate.run((_) async => throw StateError('boom')),
+        gate.run((_, _) async => throw StateError('boom')),
         throwsStateError,
       );
       expect(gate.busyCount, 0);
 
-      expect(await gate.run((t) async => t), 'tok-0');
+      expect(await gate.run((t, _) async => t), 'tok-0');
       expect(gate.busyCount, 0);
     });
 
@@ -241,7 +241,7 @@ void main() {
       final gen = await gate.acquire(); // 假装一条生成正在跑
 
       var upscaled = false;
-      unawaited(gate.run((_) async => upscaled = true));
+      unawaited(gate.run((_, _) async => upscaled = true));
       await Future<void>.delayed(Duration.zero);
       expect(upscaled, isFalse); // 超分得等生成让位,不能自己开一路打过去
 

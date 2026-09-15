@@ -213,6 +213,10 @@ class _JobRun {
 
   /// 直连:闸门在取槽时一并定下的令牌(bot 线为 null)。
   String? token;
+
+  /// 直连:那把 Key 打哪台机器(空 = 官方)。跟令牌一起由闸门定下 ——
+  /// 这里自己再查一次会在中途增删 Key 时错位,把请求发到别人那台上。
+  String base = '';
 }
 
 class GenerationNotifier extends Notifier<GenPool> {
@@ -391,7 +395,14 @@ class GenerationNotifier extends Notifier<GenPool> {
 
   /// [using] 非空时用该快照跑(图库「重新生成」按本图参数复现),不动用户当前编辑器状态。
   /// 返回本张的结局:循环据此决定续跑/中止,队列据此决定能不能安全重试。
-  Future<GenOutcome> generate({GenerateState? using}) async {
+  /// [onJob] 在占位卡挂上去那一刻同步回调,给调用方一个跟住这一单的把手 ——
+  /// AI 助手要拿它在对话里画逐帧预览和进度条。**建卡之前没有 await**,
+  /// 所以同步调用方拿到它时这一单必定已经在池子里了。
+  Future<GenOutcome> generate({
+    GenerateState? using,
+    bool stay = false,
+    void Function(String jobId)? onJob,
+  }) async {
     // 池满拒收。守卫与建卡之间**不能有 await**:按钮不再禁用,连点两下会各自
     // 走一遍这里,中间插一个 await 就等于没守。
     if (state.jobs.length >= kMaxPoolJobs) {
@@ -454,12 +465,16 @@ class GenerationNotifier extends Notifier<GenPool> {
       selectedId: job.id, // 新提交的这条接管画布(与并行前「点了就看着它」一致)
       clearError: true,
     );
+    onJob?.call(job.id);
 
     // 只有「这一批的头一条」才把页面拽去图库看预览。并行之后连点是常态,
     // 每点一次都强拉一次等于把人按在图库页上 —— 想连投几条再回创作页改参数
     // 都做不到。池子空了之后的下一条重新算作头一条,又会切一次。
     // 循环/队列续张同样不强拉(循环开始时已切过一次,期间允许自由切页,真机反馈)。
-    if (firstOfBatch && !_inFlow) {
+    //
+    // [stay] 是调用方说「这一单我自己显示,别切页」—— AI 助手开了「图片显示在
+    // 对话里」就走这条:图照常入库,只是不把人从对话里拽走。
+    if (firstOfBatch && !_inFlow && !stay) {
       ref.read(shellIndexProvider.notifier).select(kTabGallery);
     }
 
@@ -474,6 +489,7 @@ class GenerationNotifier extends Notifier<GenPool> {
             .acquire(paid: _isPaid(s), abort: run.abort);
         run.slot = pass.slot;
         run.token = pass.token;
+        run.base = pass.base;
         // 一把可用的都没有 → 闸门给 -1 + null。不能当成「被取消」静静收掉,
         // 那样点了生成什么都不会发生。
         //
@@ -558,6 +574,12 @@ class GenerationNotifier extends Notifier<GenPool> {
 
     final total = s.params.steps;
 
+    // 打哪台机器:闸门给的那把 Key 自己的地址(第三方的 key 只在它那台上有效)。
+    final client = ref.read(naiClientProvider(run.base));
+
+    // 走流式还是一次性,整单开头定一次:中途设置变了不该让这一单换端点。
+    final streaming = _streamGen;
+
     final abort = run.abort;
 
     // 后台进度:首张开前台服务;续张就地刷新(不重拉服务,避免岛一张一闪)。
@@ -603,28 +625,48 @@ class GenerationNotifier extends Notifier<GenPool> {
         );
         if (abort.aborted) return _cancelled(jobId);
         Uint8List? last;
-        await for (final f
-            in ref
-                .read(naiClientProvider)
-                .generateImageStream(
-                  token: token,
-                  body: built.body,
-                  abort: abort,
-                )) {
-          last = f.bytes;
-          final step = f.isFinal ? total : (f.step ?? 0);
+        if (streaming) {
+          await for (final f in client.generateImageStream(
+            token: token,
+            body: built.body,
+            abort: abort,
+          )) {
+            last = f.bytes;
+            final step = f.isFinal ? total : (f.step ?? 0);
+            _patch(
+              jobId,
+              (j) => j.copyWith(
+                stage: GenJobStage.running,
+                step: step,
+                total: total,
+                preview: f.bytes,
+                clearNote: true,
+              ),
+            );
+            _pushProgress();
+            if (f.isFinal) break;
+          }
+        } else {
+          // 关了流式:整张画完才回来,期间没有步数 —— 置 step 0 走不确定进度条
+          // (GenJob.progress 见 sampling),别摆一根永远停在 0% 的确定态条。
           _patch(
             jobId,
             (j) => j.copyWith(
               stage: GenJobStage.running,
-              step: step,
+              step: 0,
               total: total,
-              preview: f.bytes,
               clearNote: true,
             ),
           );
           _pushProgress();
-          if (f.isFinal) break;
+          last = await client.generateImage(
+            token: token,
+            body: built.body,
+            abort: abort,
+          );
+          // 取消赶在连接建立之前的话,这一发拦不住、会正常回来一张图 ——
+          // 那也不能入库:任务卡此刻已在等这个返回值才肯消失。
+          if (abort.aborted) return _cancelled(jobId);
         }
         if (last == null) throw NaiException('未收到图片数据');
         await finish(last, built.seed);
@@ -632,12 +674,16 @@ class GenerationNotifier extends Notifier<GenPool> {
       } on NaiException catch (e) {
         if (abort.aborted) return _cancelled(jobId);
         logd('[gen] NaiException status=${e.status} ${e.message}');
-        // 流式端点不可用(404/405 = 请求没被受理,未扣点)→ 非流式回退
-        if ((e.status == 404 || e.status == 405) && built != null) {
+        // 流式端点不可用(404/405 = 请求没被受理,未扣点)→ 非流式回退。
+        // 本来就没走流式的不再回退:同一个端点再打一遍只会同样 404。
+        if (streaming &&
+            (e.status == 404 || e.status == 405) &&
+            built != null) {
           try {
-            final bytes = await ref
-                .read(naiClientProvider)
-                .generateImage(token: token, body: built.body);
+            final bytes = await client.generateImage(
+              token: token,
+              body: built.body,
+            );
             await finish(bytes, built.seed);
             return GenOutcome.ok;
           } on NaiException catch (e2) {
@@ -705,6 +751,9 @@ class GenerationNotifier extends Notifier<GenPool> {
   /// 透明图的 alpha 编码约定(见 [GenSettings.straightAlpha])。
   bool get _straightAlpha =>
       ref.read(genSettingsProvider).value?.straightAlpha ?? true;
+
+  /// 直连走不走流式端点(见 [GenSettings.streamGen])。bot 线不看这个。
+  bool get _streamGen => ref.read(genSettingsProvider).value?.streamGen ?? true;
 
   /// 这一单要不要扣 Anlas。关了「使用点数」的 Key 只跑不花钱的活,得先问这个。
   ///
@@ -959,7 +1008,9 @@ class GenerationNotifier extends Notifier<GenPool> {
         // 而任务其实已经在服务端建好了 —— 不在这补一刀,它会照常排队、照常出图、
         // 照常收钱,而 app 这边显示的是「已取消」。
         if (abort.aborted) {
-          unawaited(client.cancelTask(sub.taskId!, sessionId: session.sessionId));
+          unawaited(
+            client.cancelTask(sub.taskId!, sessionId: session.sessionId),
+          );
           return _cancelled(jobId);
         }
 

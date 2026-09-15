@@ -106,7 +106,6 @@ class CompletionBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = context.scheme;
     if (query.isEmpty) return const SizedBox.shrink();
 
     // 自有库(画师串 / OC)排在上游结果之前。
@@ -135,8 +134,13 @@ class CompletionBar extends StatelessWidget {
         }
       },
       child: Material(
-        color: scheme.surfaceContainer,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        color: context.editorDock,
+        // 圆角顶 + 一圈发丝线:左右两条压在屏幕边上看不见,实际读到的
+        // 就是顺着圆角走的上沿(和词条栏那条同一副写法)。
+        shape: RoundedRectangleBorder(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          side: BorderSide(color: context.editorDockLine),
+        ),
         child: Padding(
           padding: const EdgeInsets.only(top: 4, bottom: 5),
           child: Column(

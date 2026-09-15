@@ -108,8 +108,13 @@ class _AccountPageState extends ConsumerState<AccountPage> {
 /// 点哪块哪块就是主账号)、左下角是这几个号加起来的点数与额度、
 /// 右下角进[TokenManagePage]。
 ///
+/// 这里**没有接口地址**:地址跟着每把令牌走(见 [NaiKey.endpoint]),在
+/// [TokenManagePage] 的「添加令牌 → 第三方」里和 key 一起填。
+///
 /// 只摆**真会被用到**的:这一块回答的是「现在直连拿哪几个号在跑」,没勾并发
 /// 生成的属于管理范畴,归二级页。细节(完整读数、单项开关、增删)也全在二级页。
+///
+/// 最多摆 [_kQuickSwitchMax] 块:这张卡是「随手换个号」,不是号池的全景。
 class _TokenCard extends StatelessWidget {
   const _TokenCard({
     required this.keys,
@@ -132,13 +137,14 @@ class _TokenCard extends StatelessWidget {
       for (final k in keys)
         if (k.forGenerate) k,
     ];
+    final shown = _quickSwitchSlice(on);
 
     return Material(
       color: scheme.surfaceContainerLow,
       borderRadius: BorderRadius.circular(16),
       clipBehavior: Clip.antiAlias,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 15, 16, 12),
+        padding: const EdgeInsets.fromLTRB(16, 15, 16, 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -177,23 +183,23 @@ class _TokenCard extends StatelessWidget {
                   children: [
                     // 一行两块:一块只写名字(或尾号)+ 档位,认得出是谁就够了。
                     // 更细的读数在二级页,这里挤三块就只剩省略号了。
-                    for (var i = 0; i < on.length; i += 2)
+                    for (var i = 0; i < shown.length; i += 2)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Row(
                           children: [
                             Expanded(
                               child: _KeyChipTile(
-                                k: on[i],
-                                onTap: () => onPrimary(on[i].id),
+                                k: shown[i],
+                                onTap: () => onPrimary(shown[i].id),
                               ),
                             ),
                             const SizedBox(width: 8),
                             Expanded(
-                              child: i + 1 < on.length
+                              child: i + 1 < shown.length
                                   ? _KeyChipTile(
-                                      k: on[i + 1],
-                                      onTap: () => onPrimary(on[i + 1].id),
+                                      k: shown[i + 1],
+                                      onTap: () => onPrimary(shown[i + 1].id),
                                     )
                                   // 奇数个时留空占位,免得最后那块拉成整行宽
                                   : const SizedBox.shrink(),
@@ -231,6 +237,23 @@ class _TokenCard extends StatelessWidget {
   }
 }
 
+/// 账号页这张卡最多摆几块。存得下十几把,但这里是「随手换个号」的地方:
+/// 一行两块,再多就把生成方式、Bot、补全那几张卡全顶到屏外了。看全的、
+/// 调顺序的、增删的都在[TokenManagePage]。
+const _kQuickSwitchMax = 6;
+
+/// 摆哪几块:按令牌管理页里的顺序取前 [_kQuickSwitchMax] 个 —— 常用的自己拖到
+/// 前面去。**主账号一定在里面**:它排在第七往后时顶掉末位那块,不然这片圆钮
+/// 一个都不亮,看着就是「没选中任何账号」。
+List<NaiKey> _quickSwitchSlice(List<NaiKey> on) {
+  if (on.length <= _kQuickSwitchMax) return on;
+  final head = on.take(_kQuickSwitchMax).toList();
+  final at = on.indexWhere((k) => k.primary);
+  // at < 0 也走这支:一把都没认领主账号时本来就没有圆钮该亮,不必顶谁。
+  if (at < _kQuickSwitchMax) return head;
+  return [...head.take(_kQuickSwitchMax - 1), on[at]];
+}
+
 /// 参与生成的这几个号**加起来**的点数与额度。
 ///
 /// 额度按**相加**算(两个号各 87% / 50% → 137%),不是取平均:平均水位看着像
@@ -254,7 +277,7 @@ class _TotalsLine extends ConsumerWidget {
     var got = 0;
     var hasUsage = false;
     for (final k in keys) {
-      final sub = ref.watch(naiKeyStatusProvider(k.token)).value;
+      final sub = ref.watch(naiKeyStatusProvider(naiTargetOf(k))).value;
       if (sub == null) continue;
       got++;
       anlas += sub.anlas;
@@ -295,7 +318,7 @@ class _KeyChipTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = context.scheme;
     final named = k.label.trim().isNotEmpty;
-    final tier = ref.watch(naiKeyStatusProvider(k.token)).value;
+    final tier = ref.watch(naiKeyStatusProvider(naiTargetOf(k))).value;
     return AnimatedContainer(
       duration: Motion.fast,
       curve: Motion.standard,

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 自编精简版 ONNX Runtime 的坐标声明。见 android/build.gradle.kts 的说明。
+     无传递依赖:AAR 自带 .so 与 Java 绑定,不依赖其它构件。 -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.microsoft.onnxruntime</groupId>
+  <artifactId>onnxruntime-android</artifactId>
+  <version>1.23.0</version>
+  <packaging>aar</packaging>
+</project>

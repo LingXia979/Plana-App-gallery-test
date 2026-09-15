@@ -8,7 +8,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/bot_session_store.dart';
 import '../../core/net/backend_client.dart';
 import '../../core/net/remote_image.dart';
+import '../../core/store/ui_prefs.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/ui/fade_in_once.dart';
+import '../../core/ui/pinch_columns.dart';
 import '../../core/ui/scroll_memory.dart';
 import '../../core/ui/selection_bar.dart';
 import '../editor/editor_models.dart' show draftOf, outputOf, pickEditorText;
@@ -39,6 +42,9 @@ typedef _Group = ({Widget header, List<TagEntry> items});
 /// 网格卡片间距(骨架与真实网格共用,保证切换时不跳位)。
 const _gap = 10.0;
 
+/// 网格默认列数。双指捏合可在 1 列到该分类的上限之间换档,每个分类记各的。
+const _kCols = 2;
+
 /// 灵感页:web Tag 管理器的移动端形态(底部 tab 常驻页,非弹窗)。
 /// 布局随 Vibe 管理器(搜索 + 我的/公共库分段 + 网格 + 底部操作条),
 /// 分类切换走左侧抽屉(角色/画风/场景/其他;自定义分类未开放,不做)。
@@ -50,7 +56,10 @@ class InspirationPage extends ConsumerStatefulWidget {
 }
 
 class _InspirationPageState extends ConsumerState<InspirationPage>
-    with AutomaticKeepAliveClientMixin, SingleTickerProviderStateMixin {
+    with
+        AutomaticKeepAliveClientMixin,
+        TickerProviderStateMixin,
+        PinchColumnsMixin {
   TagCategory _cat = TagCategory.character;
 
   /// 选中「法典」分类:正文切换为只读的法典浏览器 [CodexView],其余分类照旧。
@@ -179,12 +188,45 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
       _authorFilter = null;
       if (!tagCategoryDef(c).hasPublic) _tab.index = 0;
     });
+    // 换完 _cat 再换:上限跟着新分类的卡片形状走
+    jumpGridColumns(_savedCols(c));
     // 新分类的列表要等这一帧布好才有 maxScrollExtent,落位排到帧后。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _jumpTo(_mineScroll, wantMine);
       _jumpTo(_pubScroll, wantPub);
     });
+  }
+
+  // ---- 双指捏合改列数(见 PinchColumnsMixin) ----
+
+  int _savedCols(TagCategory c) =>
+      ref.read(uiPrefsProvider).inspirationColumns[c.name] ?? _kCols;
+
+  @override
+  int get initialGridColumns => _savedCols(_cat);
+
+  @override
+  int get minGridColumns => 1;
+
+  /// 横幅卡(画风)封顶 3 列:再多一列,卡片矮到名字条和角上的按钮就把图盖满了。
+  @override
+  int get maxGridColumns => _def.previewAspect > 1 ? 3 : 4;
+
+  @override
+  ScrollController get pinchScrollController =>
+      _def.hasPublic && _tabIndex == 1 ? _pubScroll : _mineScroll;
+
+  @override
+  void onGridColumnsChanged(int cols) {
+    final key = _cat.name;
+    ref
+        .read(uiPrefsProvider.notifier)
+        .patch(
+          (p) => p.copyWith(
+            inspirationColumns: {...p.inspirationColumns, key: cols},
+          ),
+        );
   }
 
   // ---- 数据 ----
@@ -466,13 +508,15 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
           Expanded(
             // 禁 TabBarView 横滑:横滑手势留给 shell PageView 切底部 tab
             // (与场景/其他分类行为一致),scope 切换走分段控件点按。
-            child: def.hasPublic
-                ? TabBarView(
-                    controller: _tab,
-                    physics: const NeverScrollableScrollPhysics(),
-                    children: [_mineTab(lib), _publicTab(lib)],
-                  )
-                : _mineTab(lib),
+            child: pinchLayer(
+              child: def.hasPublic
+                  ? TabBarView(
+                      controller: _tab,
+                      physics: const NeverScrollableScrollPhysics(),
+                      children: [_mineTab(lib), _publicTab(lib)],
+                    )
+                  : _mineTab(lib),
+            ),
           ),
         ],
       ),
@@ -1051,7 +1095,9 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
 
   Widget _publicContent(AsyncValue<List<TagEntry>> async) {
     return async.when(
-      loading: () => _SkeletonGrid(aspect: _cardAspect),
+      loading: () => pinchBuilder(
+        (_) => _SkeletonGrid(aspect: _cardAspect, cols: gridColumns),
+      ),
       error: (e, _) {
         // 会话过期后端回 401/403,与无会话同样给「去授权」出口,
         // 别让人困在「重试永远失败」里。
@@ -1236,55 +1282,67 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
         if (p.publicId != null && p.previewUrl != null)
           p.publicId!: p.previewUrl!,
     };
-    return CustomScrollView(
-      controller: ctrl,
-      physics: const AlwaysScrollableScrollPhysics(),
-      slivers: [
-        for (final g in groups) ...[
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(_kEdge, 2, _kEdge, 0),
-            sliver: SliverToBoxAdapter(child: g.header),
-          ),
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(_kEdge, 8, _kEdge, 16),
-            sliver: SliverGrid(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                mainAxisSpacing: _gap,
-                crossAxisSpacing: _gap,
-                childAspectRatio: _cardAspect,
-              ),
-              delegate: SliverChildBuilderDelegate((context, i) {
-                final e = g.items[i];
-                final preview =
-                    (e.publicId != null ? pubPreview[e.publicId] : null) ??
-                    e.previewUrl;
-                return _TagCard(
-                  key: ValueKey(e.id),
-                  entry: e,
-                  previewUrl: preview,
-                  selected: _sel.contains(e.id),
-                  isPublic: isPublic,
-                  collected:
-                      isPublic &&
-                      ref
-                          .read(tagLibraryProvider.notifier)
-                          .isCollected(
-                            _cat,
-                            publicId: e.publicId,
-                            name: e.name,
-                          ),
-                  onTap: () => _toggle(e),
-                  onLongPress: () => showTagDetailSheet(context, e),
-                  onCollect: isPublic ? () => _collect(e) : null,
-                  onMenu: isPublic ? null : (v) => _cardMenu(v, e),
-                );
-              }, childCount: g.items.length),
+    // 分组、预览表在外面算好;捏合与过渡只重建下面这一块(见 pinchBuilder)
+    return pinchBuilder((_) {
+      // 远端预览按**落定**列数下的格宽解码(gridColumns 在换档过渡中是起点那一档)。
+      // 不给的话 RemoteImage 按实时格宽解码,过渡那几百毫秒里每一帧都是一路新解码。
+      final cols = gridColumns;
+      final decodeW =
+          (MediaQuery.sizeOf(context).width - _kEdge * 2 - _gap * (cols - 1)) /
+          cols;
+      return CustomScrollView(
+        controller: ctrl,
+        physics: pinchPhysics(const AlwaysScrollableScrollPhysics()),
+        slivers: [
+          for (final g in groups) ...[
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(_kEdge, 2, _kEdge, 0),
+              sliver: SliverToBoxAdapter(child: g.header),
             ),
-          ),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(_kEdge, 8, _kEdge, 16),
+              sliver: SliverGrid(
+                gridDelegate: zoomGridDelegate(
+                  (n) => SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: n,
+                    mainAxisSpacing: _gap,
+                    crossAxisSpacing: _gap,
+                    childAspectRatio: _cardAspect,
+                  ),
+                ),
+                delegate: SliverChildBuilderDelegate((context, i) {
+                  final e = g.items[i];
+                  final preview =
+                      (e.publicId != null ? pubPreview[e.publicId] : null) ??
+                      e.previewUrl;
+                  return _TagCard(
+                    key: ValueKey(e.id),
+                    entry: e,
+                    previewUrl: preview,
+                    decodeWidth: decodeW,
+                    selected: _sel.contains(e.id),
+                    isPublic: isPublic,
+                    collected:
+                        isPublic &&
+                        ref
+                            .read(tagLibraryProvider.notifier)
+                            .isCollected(
+                              _cat,
+                              publicId: e.publicId,
+                              name: e.name,
+                            ),
+                    onTap: () => _toggle(e),
+                    onLongPress: () => showTagDetailSheet(context, e),
+                    onCollect: isPublic ? () => _collect(e) : null,
+                    onMenu: isPublic ? null : (v) => _cardMenu(v, e),
+                  );
+                }, childCount: g.items.length),
+              ),
+            ),
+          ],
         ],
-      ],
-    );
+      );
+    });
   }
 
   /// 画风分类包一层右缘字母导航。**只在按编号排时**有:换成时间/作者以后
@@ -1320,16 +1378,17 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
 
   void _jumpToLetter(List<_Group> groups, ScrollController ctrl, String l) {
     if (!ctrl.hasClients) return;
+    final cols = gridColumns;
     final w = context.size?.width ?? 400;
-    final itemW = (w - _kEdge * 2 - _gap) / 2;
+    final itemW = (w - _kEdge * 2 - _gap * (cols - 1)) / cols;
     final rowExtent = itemW / _cardAspect + _gap;
     // 逐组累加(组头 + 该组行高),命中组内再按行偏移
     var offset = 0.0;
     for (final g in groups) {
       final i = g.items.indexWhere((e) => letterOfName(e.name) == l);
-      final rows = (g.items.length + 1) ~/ 2;
+      final rows = (g.items.length + cols - 1) ~/ cols;
       if (i >= 0) {
-        offset += 2 + _headerH + 8 + (i ~/ 2) * rowExtent;
+        offset += 2 + _headerH + 8 + (i ~/ cols) * rowExtent;
         ctrl.jumpTo(offset.clamp(0.0, ctrl.position.maxScrollExtent));
         return;
       }
@@ -1628,9 +1687,10 @@ class _InspirationPageState extends ConsumerState<InspirationPage>
 
 /// 公共库加载态:骨架网格(卡片形状 + 呼吸微光),比干等一个转圈更有"内容在来"。
 class _SkeletonGrid extends StatefulWidget {
-  const _SkeletonGrid({required this.aspect});
+  const _SkeletonGrid({required this.aspect, required this.cols});
 
   final double aspect;
+  final int cols;
 
   @override
   State<_SkeletonGrid> createState() => _SkeletonGridState();
@@ -1653,14 +1713,14 @@ class _SkeletonGridState extends State<_SkeletonGrid>
   Widget build(BuildContext context) {
     final scheme = context.scheme;
     return GridView.count(
-      crossAxisCount: 2,
+      crossAxisCount: widget.cols,
       padding: const EdgeInsets.fromLTRB(_kEdge, 42, _kEdge, 16),
       mainAxisSpacing: _gap,
       crossAxisSpacing: _gap,
       childAspectRatio: widget.aspect,
       physics: const NeverScrollableScrollPhysics(),
       children: [
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < widget.cols * 3; i++)
           FadeTransition(
             opacity: Tween(
               begin: .35,
@@ -1678,20 +1738,43 @@ class _SkeletonGridState extends State<_SkeletonGrid>
   }
 }
 
-/// 图片加载完淡入(缓存命中的同步图不淡),让预览逐张柔和显现而非硬蹦。
-Widget _fadeInFrame(
-  BuildContext context,
-  Widget child,
-  int? frame,
-  bool wasSync,
-) {
-  if (wasSync) return child;
-  return AnimatedOpacity(
-    opacity: frame == null ? 0 : 1,
-    duration: Motion.medium,
-    curve: Curves.easeOut,
-    child: child,
-  );
+/// 卡片预览图:无图 = 名称定色相的斜纹占位;http 走磁盘缓存;本机路径直读。
+/// 加载完淡入,让预览逐张柔和显现而非硬蹦(只淡第一次,见 [FadeInOnce])。
+class _CardPreview extends StatelessWidget {
+  const _CardPreview({required this.url, required this.name, this.decodeWidth});
+
+  final String? url;
+  final String name;
+
+  /// 远端图的解码宽(逻辑像素);null = 按布局宽。
+  final double? decodeWidth;
+
+  Widget _stripes(BuildContext context, Object error, StackTrace? stack) =>
+      _HueStripes(name: name);
+
+  @override
+  Widget build(BuildContext context) => switch (url) {
+    null => _HueStripes(name: name),
+    final u => FadeInOnce(
+      source: u,
+      builder: (_, frame) => u.startsWith('http')
+          ? RemoteImage(
+              u,
+              fit: BoxFit.cover,
+              decodeWidth: decodeWidth,
+              gaplessPlayback: true,
+              frameBuilder: frame,
+              errorBuilder: _stripes,
+            )
+          : Image.file(
+              File(u),
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              frameBuilder: frame,
+              errorBuilder: _stripes,
+            ),
+    ),
+  };
 }
 
 /// 网格卡:预览图(无图=名称定色相的斜纹占位)+ 底部名称条 + 来源角标;
@@ -1708,6 +1791,7 @@ class _TagCard extends StatelessWidget {
     required this.onLongPress,
     this.onCollect,
     this.onMenu,
+    this.decodeWidth,
   });
 
   final TagEntry entry;
@@ -1722,10 +1806,23 @@ class _TagCard extends StatelessWidget {
   final VoidCallback? onCollect;
   final ValueChanged<String>? onMenu;
 
+  /// 远端预览的解码宽(逻辑像素)。
+  final double? decodeWidth;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => LayoutBuilder(
+    // 捏到三四列以后卡片很小,角上两颗按钮和名字条照原尺寸画会把图盖满:收小
+    // 一档,型号角标也收掉。按实测尺寸判,换档过渡途中越过门槛就换。
+    builder: (context, c) =>
+        _card(context, compact: c.maxWidth < 100 || c.maxHeight < 100),
+  );
+
+  Widget _card(BuildContext context, {required bool compact}) {
     final scheme = context.scheme;
     final modelGroups = artistModelGroups(entry.models);
+    // 角上两颗按钮的边长与离边距离
+    final btn = compact ? 30.0 : 40.0;
+    final inset = compact ? 4.0 : 6.0;
     return AnimatedContainer(
       duration: Motion.fast,
       clipBehavior: Clip.antiAlias,
@@ -1745,29 +1842,19 @@ class _TagCard extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              switch (previewUrl) {
-                null => _HueStripes(name: entry.name),
-                final u when u.startsWith('http') => RemoteImage(
-                  u,
-                  fit: BoxFit.cover,
-                  gaplessPlayback: true,
-                  frameBuilder: _fadeInFrame,
-                  errorBuilder: (_, _, _) => _HueStripes(name: entry.name),
-                ),
-                final u => Image.file(
-                  File(u),
-                  fit: BoxFit.cover,
-                  gaplessPlayback: true,
-                  frameBuilder: _fadeInFrame,
-                  errorBuilder: (_, _, _) => _HueStripes(name: entry.name),
-                ),
-              },
+              _CardPreview(
+                url: previewUrl,
+                name: entry.name,
+                decodeWidth: decodeWidth,
+              ),
               Positioned(
                 left: 0,
                 right: 0,
                 bottom: 0,
                 child: Container(
-                  padding: const EdgeInsets.fromLTRB(10, 14, 8, 7),
+                  padding: compact
+                      ? const EdgeInsets.fromLTRB(7, 10, 6, 5)
+                      : const EdgeInsets.fromLTRB(10, 14, 8, 7),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
@@ -1784,7 +1871,7 @@ class _TagCard extends StatelessWidget {
                     children: [
                       // 适用模型角标(按分档归并:标了 V5 Full + Curated 只出一个)。
                       // 没标注的不画 —— 「通用」是默认档,给每张卡都挂一个反而是噪音。
-                      if (modelGroups.isNotEmpty) ...[
+                      if (modelGroups.isNotEmpty && !compact) ...[
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -1826,7 +1913,7 @@ class _TagCard extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 13,
+                          fontSize: compact ? 11.5 : 13,
                           fontWeight: FontWeight.w800,
                           color: selected ? scheme.primary : Colors.white,
                         ),
@@ -1836,12 +1923,12 @@ class _TagCard extends StatelessWidget {
                 ),
               ),
               Positioned(
-                top: 7,
-                left: 7,
+                top: compact ? 5 : 7,
+                left: compact ? 5 : 7,
                 child: AnimatedContainer(
                   duration: Motion.fast,
-                  width: 24,
-                  height: 24,
+                  width: compact ? 20 : 24,
+                  height: compact ? 20 : 24,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: selected
@@ -1852,7 +1939,11 @@ class _TagCard extends StatelessWidget {
                         : Border.all(color: Colors.white70, width: 1.5),
                   ),
                   child: selected
-                      ? Icon(Icons.check, size: 16, color: scheme.onPrimary)
+                      ? Icon(
+                          Icons.check,
+                          size: compact ? 13 : 16,
+                          color: scheme.onPrimary,
+                        )
                       : null,
                 ),
               ),
@@ -1860,8 +1951,8 @@ class _TagCard extends StatelessWidget {
               // 我的卡:右上角 ⋮ 菜单。
               if (isPublic)
                 Positioned(
-                  right: 6,
-                  top: 6,
+                  right: inset,
+                  top: inset,
                   child: Material(
                     color: collected
                         ? Colors.white.withValues(alpha: .92)
@@ -1871,11 +1962,11 @@ class _TagCard extends StatelessWidget {
                     child: InkWell(
                       onTap: onCollect,
                       child: SizedBox(
-                        width: 40,
-                        height: 40,
+                        width: btn,
+                        height: btn,
                         child: Icon(
                           collected ? Icons.favorite : Icons.favorite_border,
-                          size: 21,
+                          size: compact ? 17 : 21,
                           color: collected ? scheme.error : Colors.white,
                         ),
                       ),
@@ -1884,21 +1975,21 @@ class _TagCard extends StatelessWidget {
                 ),
               if (!isPublic)
                 Positioned(
-                  right: 6,
-                  top: 6,
+                  right: inset,
+                  top: inset,
                   child: Material(
                     color: Colors.black.withValues(alpha: .42),
                     shape: const CircleBorder(),
                     clipBehavior: Clip.antiAlias,
                     child: SizedBox(
-                      width: 40,
-                      height: 40,
+                      width: btn,
+                      height: btn,
                       child: PopupMenuButton<String>(
                         onSelected: onMenu,
                         padding: EdgeInsets.zero,
-                        icon: const Icon(
+                        icon: Icon(
                           Icons.more_vert,
-                          size: 20,
+                          size: compact ? 17 : 20,
                           color: Colors.white,
                         ),
                         itemBuilder: (_) => [

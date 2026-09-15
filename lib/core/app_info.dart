@@ -8,8 +8,8 @@ library;
 /// `android:label` 一起改 —— 那个是桌面图标下的名字,读不到 Dart 常量。
 const kAppName = 'Plana App';
 const kAppTagline = 'NovelAI 移动创作端';
-const kAppVersion = '1.0.9';
-const kAppBuild = '17';
+const kAppVersion = '1.1.0';
+const kAppBuild = '18';
 
 /// 预发布版(版号带 `-`):关于页加内测标,免得测试反馈回来分不清版本。
 bool get kIsPrerelease => kAppVersion.contains('-');
@@ -30,6 +30,10 @@ const kOfflineTagSourceUrl =
 
 /// NovelAI 官网。本应用是第三方客户端,出图能力全部来自它。
 const kNovelAiUrl = 'https://novelai.net/';
+
+/// 自动打码的检测模型(`assets/models/censor_n.ort`,随包分发)。
+/// deepghs 在二次元数据上训练的 YOLOv8,MIT —— 详见 THIRD_PARTY_NOTICES.md。
+const kCensorModelUrl = 'https://huggingface.co/deepghs/anime_censor_detection';
 
 /// QQ 交流群号。关于页那一行点了就是复制它 —— 不做跳转:
 /// 一键加群短链会先弹一下浏览器再跳回 QQ,唤起 scheme 又得赌机型与 QQ 版本,

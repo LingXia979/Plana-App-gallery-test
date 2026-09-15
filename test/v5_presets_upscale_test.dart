@@ -74,6 +74,64 @@ void main() {
     });
   });
 
+  // 管理页长按拖出来的顺序存的是一串 id。难点全在「表里没有的那些」:
+  // 换版本新增的内置档、刚导入的自定义档,都不能把已排好的那段打乱。
+  group('orderPromptPresets:拖动排序的落地顺序', () {
+    test('按存下来的 id 排', () {
+      final r = orderPromptPresets(_all, [
+        'custom_1',
+        'none',
+        'v5-light',
+        'v5-standard',
+        'light',
+        'heavy',
+      ]).map((p) => p.id);
+      expect(r, [
+        'custom_1',
+        'none',
+        'v5-light',
+        'v5-standard',
+        'light',
+        'heavy',
+      ]);
+    });
+
+    test('顺序表里没有的按原序缀在末尾', () {
+      final r = orderPromptPresets(_all, ['none', 'custom_1']).map((p) => p.id);
+      expect(r, [
+        'none',
+        'custom_1',
+        'heavy',
+        'light',
+        'v5-standard',
+        'v5-light',
+      ]);
+    });
+
+    test('顺序表为空 = 原序(老存档 / 从没拖过)', () {
+      expect(
+        orderPromptPresets(_all, const []).map((p) => p.id),
+        _all.map((p) => p.id),
+      );
+    });
+
+    test('顺序表里有已删掉的档不影响其余', () {
+      final r = orderPromptPresets(_all, [
+        '已删除的档',
+        'custom_1',
+        'heavy',
+      ]).map((p) => p.id);
+      expect(r, [
+        'custom_1',
+        'heavy',
+        'light',
+        'v5-standard',
+        'v5-light',
+        'none',
+      ]);
+    });
+  });
+
   // 官方从 V4 起把质量词放**末尾**,UC 一律前缀。内置档全部照此 ——
   // heavy/light 历史上是前缀,已与官方对齐成后缀。
   group('applyPromptPreset:正面恒后缀,负面恒前缀', () {

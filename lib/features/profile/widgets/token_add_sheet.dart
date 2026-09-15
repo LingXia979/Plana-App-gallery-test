@@ -7,6 +7,7 @@ import '../../../core/auth/nai_keys.dart';
 import '../../../core/auth/token_probe.dart';
 import '../../../core/auth/token_store.dart';
 import '../../../core/net/nai_client.dart';
+import '../../../core/net/nai_endpoint.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/util/haptics.dart';
 import 'token_status.dart';
@@ -14,11 +15,15 @@ import 'token_status.dart';
 /// 添加令牌弹层。返回 true = 加进去了。
 ///
 /// 做成弹层而不是常驻在管理页底部:添加是**偶发**动作,常驻会被令牌列表越推越
-/// 靠下,存满 8 把时要滚过整页才够得着。
+/// 靠下,存了十几把时要滚过整页才够得着。
 ///
-/// 两种来路(手贴令牌 / 邮箱登录)在**同一个弹层**里切,不是「弹层里再弹一层」
-/// —— 那样两层拖拽条叠着,退回来还得点两次。切换时键盘不落,弹层高度只补一段
-/// 过渡,不会看着像重开一次。
+/// 三种来路(手贴令牌 / 邮箱登录 / 第三方接口)在**同一个弹层**里切,不是
+/// 「弹层里再弹一层」—— 那样两层拖拽条叠着,退回来还得点两次。切换时键盘不落,
+/// 弹层高度只补一段过渡,不会看着像重开一次。
+///
+/// 第三方那一路要的是**地址 + key 一起填**:地址跟着这把令牌存(见
+/// [NaiKey.endpoint]),不是全局设置 —— 中转站各有各的地址,做成全局的话
+/// 官方那几把会被一起带跑偏。
 Future<bool> showTokenAddSheet(BuildContext context) async =>
     await showModalBottomSheet<bool>(
       context: context,
@@ -28,7 +33,7 @@ Future<bool> showTokenAddSheet(BuildContext context) async =>
     ) ??
     false;
 
-enum _AddMode { paste, login }
+enum _AddMode { paste, login, third }
 
 class _TokenAddSheet extends ConsumerStatefulWidget {
   const _TokenAddSheet();
@@ -43,14 +48,18 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
   final _token = TextEditingController();
   final _email = TextEditingController();
   final _password = TextEditingController();
+  final _url = TextEditingController();
+  final _thirdKey = TextEditingController();
   bool _obscureToken = true;
   bool _obscurePw = true;
+  bool _obscureThird = true;
   bool _busy = false;
   String? _error;
 
-  /// 添加前的在线校验:输入像样的令牌就防抖直查档位,不等保存。
+  /// 添加前的在线校验:输入像样的令牌就防抖直查档位,不等保存。查的是官方 ——
+  /// 第三方那一路不校验(见 [_thirdForm])。
   late final TokenProbe _probe = TokenProbe(
-    (t) => ref.read(naiClientProvider).subscription(t),
+    (t) => ref.read(naiClientProvider('')).subscription(t),
   );
 
   @override
@@ -59,6 +68,8 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     _token.addListener(_onToken);
     _email.addListener(_onEdit);
     _password.addListener(_onEdit);
+    _url.addListener(_onEdit);
+    _thirdKey.addListener(_onEdit);
     _probe.addListener(_onProbe);
   }
 
@@ -87,15 +98,21 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     _password
       ..removeListener(_onEdit)
       ..dispose();
+    _url
+      ..removeListener(_onEdit)
+      ..dispose();
+    _thirdKey
+      ..removeListener(_onEdit)
+      ..dispose();
     super.dispose();
   }
 
-  Future<void> _paste() async {
+  Future<void> _paste(TextEditingController c) async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final t = data?.text?.trim();
     if (t == null || t.isEmpty) return;
-    _token.text = t;
-    _token.selection = TextSelection.collapsed(offset: _token.text.length);
+    c.text = t;
+    c.selection = TextSelection.collapsed(offset: c.text.length);
   }
 
   /// 手贴的这把不带续期凭证(到期需重贴);凭证跟着每把 Key 存。
@@ -126,6 +143,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
       _error = null;
     });
     try {
+      // 邮箱登录是官方那条流程(中转站不发 NAI 账号),固定打官方。
       final (jwt, key) = await naiCredentialLoginFlow(
         _email.text,
         _password.text,
@@ -149,13 +167,48 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     }
   }
 
+  /// 第三方:地址 + key 绑成一把存下。
+  ///
+  /// 形态不对当场挡下(漏协议、把整条 `…/ai/generate-image` 贴进来带了参数);
+  /// 通不通不在这里探 —— 中转站多半没开 GET,探测失败反而拦住能用的地址,
+  /// 真不通出图时会报。
+  Future<void> _addThird() async {
+    final t = _thirdKey.text.trim();
+    final url = normalizeNaiBase(_url.text);
+    if (t.isEmpty || _busy) return;
+    if (url.isEmpty || !naiBaseLooksValid(url)) {
+      setState(() => _error = '请填 http:// 或 https:// 开头的接口地址');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final added = await ref
+        .read(naiKeysStoreProvider.notifier)
+        .add(t, endpoint: url);
+    if (!mounted) return;
+    if (added == null) {
+      setState(() {
+        _busy = false;
+        _error = '最多保存 $kMaxNaiKeys 把令牌';
+      });
+      return;
+    }
+    Haptics.selection();
+    Navigator.pop(context, true);
+  }
+
   bool get _canAdd => _token.text.trim().isNotEmpty && !_busy;
   bool get _canLogin =>
       _email.text.trim().contains('@') && _password.text.isNotEmpty && !_busy;
+  bool get _canAddThird =>
+      _url.text.trim().isNotEmpty && _thirdKey.text.trim().isNotEmpty && !_busy;
 
   /// 切模式**不收键盘**:收了之后新表单的 autofocus 又会把它叫回来,
   /// 弹层就跟着「落下去再弹上来」—— 看着像整个弹窗重开了一次。
-  /// 两边首个输入框都带 autofocus,焦点直接过户,键盘全程不动。
+  /// 三边首个输入框都带 autofocus,焦点直接过户,键盘全程不动。
   void _switchMode(_AddMode m) {
     if (m == _mode) return;
     setState(() {
@@ -210,6 +263,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
                 segments: const [
                   ButtonSegment(value: _AddMode.paste, label: Text('粘贴令牌')),
                   ButtonSegment(value: _AddMode.login, label: Text('邮箱登录')),
+                  ButtonSegment(value: _AddMode.third, label: Text('第三方')),
                 ],
                 selected: {_mode},
                 showSelectedIcon: false,
@@ -217,14 +271,16 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
               ),
             ),
             const SizedBox(height: 16),
-            // 两种表单高矮不同,换 tab 时补成过渡,不然弹层会啪地跳一下。
+            // 三种表单高矮不同,换 tab 时补成过渡,不然弹层会啪地跳一下。
             AnimatedSize(
               duration: Motion.fast,
               curve: Motion.standard,
               alignment: Alignment.topCenter,
-              child: _mode == _AddMode.paste
-                  ? _pasteForm(scheme)
-                  : _loginForm(scheme),
+              child: switch (_mode) {
+                _AddMode.paste => _pasteForm(scheme),
+                _AddMode.login => _loginForm(scheme),
+                _AddMode.third => _thirdForm(scheme),
+              },
             ),
             if (_error != null) ...[
               const SizedBox(height: 10),
@@ -235,9 +291,11 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
             ],
             const SizedBox(height: 16),
             FilledButton(
-              onPressed: _mode == _AddMode.paste
-                  ? (_canAdd ? _add : null)
-                  : (_canLogin ? _login : null),
+              onPressed: switch (_mode) {
+                _AddMode.paste => _canAdd ? _add : null,
+                _AddMode.login => _canLogin ? _login : null,
+                _AddMode.third => _canAddThird ? _addThird : null,
+              },
               style: FilledButton.styleFrom(
                 minimumSize: const Size.fromHeight(46),
                 shape: RoundedRectangleBorder(
@@ -253,7 +311,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
                         color: scheme.onPrimary,
                       ),
                     )
-                  : Text(_mode == _AddMode.paste ? '添加' : '登录并添加'),
+                  : Text(_mode == _AddMode.login ? '登录并添加' : '添加'),
             ),
           ],
         ),
@@ -288,7 +346,7 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
-                onPressed: _paste,
+                onPressed: () => _paste(_token),
                 icon: const Icon(Icons.content_paste, size: 20),
                 tooltip: '粘贴',
                 color: scheme.onSurfaceVariant,
@@ -310,6 +368,83 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
       // 在线校验:贴进来的这把是哪个档、还剩多少点,加之前就看得见。
       tokenStatusLine(context, _probe, onRetry: () => _probe.run(_token.text)),
       const SizedBox(height: 2),
+      Text(
+        '仅加密存储在本机',
+        style: context.texts.labelSmall!.copyWith(color: scheme.outline),
+      ),
+    ],
+  );
+
+  /// 第三方接口:地址和 key 一起填,绑成一把。
+  ///
+  /// **不做在线校验**:这里查不出对面认不认这把 key —— `/user/subscription`
+  /// 是 NAI 官方的东西,中转站大多没实现,查失败会在「添加」之前就摆一行红字,
+  /// 而那把 key 多半是好的。
+  Widget _thirdForm(ColorScheme scheme) => Column(
+    key: const ValueKey('third'),
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Text(
+        '兼容 NovelAI 接口的中转站或自建反代。地址跟这把 key 绑在一起,'
+        '官方那几把照旧走官方。',
+        style: context.texts.labelSmall!.copyWith(color: scheme.outline),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _url,
+        enabled: !_busy,
+        autofocus: true,
+        autocorrect: false,
+        enableSuggestions: false,
+        keyboardType: TextInputType.url,
+        textInputAction: TextInputAction.next,
+        style: mono(context, size: 13),
+        decoration: _dec(
+          'https://example.com',
+          suffix: IconButton(
+            onPressed: () => _paste(_url),
+            icon: const Icon(Icons.content_paste, size: 20),
+            tooltip: '粘贴',
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+      const SizedBox(height: 10),
+      TextField(
+        controller: _thirdKey,
+        enabled: !_busy,
+        obscureText: _obscureThird,
+        maxLines: _obscureThird ? 1 : 3,
+        minLines: 1,
+        autocorrect: false,
+        enableSuggestions: false,
+        keyboardType: TextInputType.visiblePassword,
+        style: mono(context, size: 13),
+        decoration: _dec(
+          '接口 key',
+          suffix: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                onPressed: () => _paste(_thirdKey),
+                icon: const Icon(Icons.content_paste, size: 20),
+                tooltip: '粘贴',
+                color: scheme.onSurfaceVariant,
+              ),
+              IconButton(
+                onPressed: () => setState(() => _obscureThird = !_obscureThird),
+                icon: Icon(
+                  _obscureThird ? Icons.visibility : Icons.visibility_off,
+                  size: 20,
+                ),
+                tooltip: _obscureThird ? '显示' : '隐藏',
+                color: scheme.onSurfaceVariant,
+              ),
+            ],
+          ),
+        ),
+      ),
+      const SizedBox(height: 10),
       Text(
         '仅加密存储在本机',
         style: context.texts.labelSmall!.copyWith(color: scheme.outline),

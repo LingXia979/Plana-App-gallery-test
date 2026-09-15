@@ -1,3 +1,12 @@
+/// NAI 账号密码登录:密码在本机派生 access key(密码本身不出设备、不落盘),
+/// 拿 key 换 30 天 JWT 走现有 token 管道。这是官网网页端同款零知识算法 ——
+/// 服务器只见派生结果。参数(Blake2b-16 盐 / Argon2id 2轮·1953KB·并行1·64字节)
+/// 由 test/core/auth 的 Python argon2-cffi 参考向量钉死,改动必先过测试。
+///
+/// `/user/*` 与 `/ai/*` 同基址,见 [kNaiOfficialBase];第三方那把跟着它自己的地址走
+/// —— 官方站连不上的人,登录和续期同样连不上。
+library;
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -7,16 +16,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../net/nai_client.dart';
+import '../net/nai_endpoint.dart';
 import 'nai_keys.dart';
-
-/// NAI 账号密码登录:密码在本机派生 access key(密码本身不出设备、不落盘),
-/// 拿 key 换 30 天 JWT 走现有 token 管道。这是官网网页端同款零知识算法 ——
-/// 服务器只见派生结果。参数(Blake2b-16 盐 / Argon2id 2轮·1953KB·并行1·64字节)
-/// 由 test/core/auth 的 Python argon2-cffi 参考向量钉死,改动必先过测试。
-///
-/// `/user/*` 在 2026-07-04 迁到了 image 子域;旧 api.novelai.net 回
-/// 400 "Please refresh NovelAI.net",别改回去。
-const _userHost = 'https://image.novelai.net';
 
 /// 派生 access key(纯计算,Argon2id 约几百毫秒,UI 侧用 [deriveNaiAccessKeyOffMain])。
 ///
@@ -52,12 +53,14 @@ Future<String> deriveNaiAccessKeyOffMain(String email, String password) =>
 
 /// 拿 access key 换 JWT:POST /user/login {key} → accessToken。
 /// 401 = key 不对,对用户而言就是邮箱或密码错了。
-Future<String> naiLoginWithKey(String accessKey) async {
+///
+/// [base] 空 = 官方,见 [kNaiOfficialBase];非空时跟着那把 Key 的地址走。
+Future<String> naiLoginWithKey(String accessKey, {String base = ''}) async {
   final http.Response resp;
   try {
     resp = await http
         .post(
-          Uri.parse('$_userHost/user/login'),
+          Uri.parse('${naiBaseOf(base)}/user/login'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'key': accessKey}),
         )
@@ -106,13 +109,14 @@ List<String> naiEmailForms(String rawEmail) {
 /// 返回成功的 (JWT, accessKey) —— accessKey 即续期凭证。
 Future<(String, String)> naiCredentialLoginFlow(
   String rawEmail,
-  String password,
-) async {
+  String password, {
+  String base = '',
+}) async {
   NaiException? denied;
   for (final email in naiEmailForms(rawEmail)) {
     final key = await deriveNaiAccessKeyOffMain(email, password);
     try {
-      return (await naiLoginWithKey(key), key);
+      return (await naiLoginWithKey(key, base: base), key);
     } on NaiException catch (e) {
       if (e.status != 401) rethrow;
       denied = e;
@@ -152,8 +156,8 @@ final naiTokenAutoRefreshProvider = FutureProvider<void>((ref) async {
   try {
     final keys = await ref.read(naiKeysStoreProvider.future);
     final store = ref.read(naiKeysStoreProvider.notifier);
-    // 逐把各续各的:每把 Key 属于不同账号,凭证也各是各的。一把失败不影响别把,
-    // 所以 try 包在循环**里面**。
+    // 逐把各续各的:每把 Key 属于不同账号,凭证也各是各的,打的机器也可能
+    // 各是各的。一把失败不影响别把,所以 try 包在循环**里面**。
     for (final k in keys) {
       final accessKey = k.accessKey;
       if (accessKey == null) continue; // 手贴 JWT,没有续期凭证,只能到期重贴
@@ -164,7 +168,10 @@ final naiTokenAutoRefreshProvider = FutureProvider<void>((ref) async {
         continue;
       }
       try {
-        await store.replaceToken(k.id, await naiLoginWithKey(accessKey));
+        await store.replaceToken(
+          k.id,
+          await naiLoginWithKey(accessKey, base: k.endpoint),
+        );
       } catch (_) {
         // 这把没续上,下次启动再试;继续看下一把。
       }

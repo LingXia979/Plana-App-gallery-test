@@ -1,0 +1,156 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:msgpack_dart/msgpack_dart.dart' as msgpack;
+
+import 'package:plana_app/core/net/gen_abort.dart';
+import 'package:plana_app/core/net/nai_client.dart';
+import 'package:plana_app/core/net/nai_endpoint.dart';
+
+/// 一帧流式消息:4 字节大端长度 + msgpack。
+List<int> _frame(Map<String, dynamic> msg) {
+  final b = msgpack.serialize(msg);
+  return [
+    (b.length >> 24) & 0xff,
+    (b.length >> 16) & 0xff,
+    (b.length >> 8) & 0xff,
+    b.length & 0xff,
+    ...b,
+  ];
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('接口地址归一:去空白/尾斜杠,填成官方等于没填', () {
+    expect(normalizeNaiBase('  https://a.b/ '), 'https://a.b');
+    expect(normalizeNaiBase('https://a.b///'), 'https://a.b');
+    expect(normalizeNaiBase('  '), '');
+    expect(normalizeNaiBase('$kNaiOfficialBase/'), '');
+    expect(naiBaseOf(''), kNaiOfficialBase);
+    expect(naiBaseOf('http://127.0.0.1:9'), 'http://127.0.0.1:9');
+  });
+
+  test('接口地址形态校验:要协议要主机,不收查询串', () {
+    expect(naiBaseLooksValid('https://nai.example.com'), isTrue);
+    expect(naiBaseLooksValid('http://192.168.1.9:7000'), isTrue);
+    expect(naiBaseLooksValid('nai.example.com'), isFalse);
+    expect(naiBaseLooksValid('ftp://nai.example.com'), isFalse);
+    expect(naiBaseLooksValid('https://a.b/ai?token=x'), isFalse);
+  });
+
+  test('主机名:整条 URL 只取主机,官方(空串)还是空串', () {
+    expect(naiBaseHost('https://relay.example.com/v1'), 'relay.example.com');
+    expect(naiBaseHost(''), '');
+  });
+
+  // TestWidgetsFlutterBinding 默认把所有 HttpClient 换成回 400 的假货,
+  // 这条要的正是真连接 —— 在自己的 zone 里换回 dart:io 的原厂实现
+  // (HttpOverrides 基类的 createHttpClient 就是它)。
+  Future<void> withRealHttp(Future<void> Function() body) =>
+      HttpOverrides.runWithHttpOverrides(body, _RealHttp());
+
+  test('令牌自带的地址:生成与查点数都提交到那台机器', () async {
+    final paths = <String>[];
+    String? auth;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      paths.add(req.uri.path);
+      auth = req.headers.value('authorization');
+      if (req.uri.path == '/user/subscription') {
+        req.response
+          ..headers.contentType = ContentType.json
+          ..write(
+            jsonEncode({
+              'active': true,
+              'tier': 3,
+              'trainingStepsLeft': {
+                'fixedTrainingStepsLeft': 7,
+                'purchasedTrainingSteps': 3,
+              },
+            }),
+          );
+      } else if (req.uri.path == '/ai/generate-image') {
+        // 非流式端点直接回 PNG(魔数开头就按裸 PNG 收,不必打包成 zip)
+        req.response.add([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, 0, 0, 0, 0]);
+      } else {
+        // 一帧终图(step_ix 缺省 = 终图)
+        req.response.add(
+          _frame({
+            'image': Uint8List.fromList([1, 2, 3]),
+          }),
+        );
+      }
+      await req.response.close();
+    });
+    addTearDown(() => server.close(force: true));
+
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+
+    // 客户端按基址分实例:地址就是那把 Key 自己带的(见 NaiKey.endpoint)
+    final base = normalizeNaiBase(
+      'http://${server.address.address}:${server.port}/',
+    );
+    expect(base, 'http://127.0.0.1:${server.port}');
+    expect(
+      c.read(naiClientProvider('')),
+      isNot(c.read(naiClientProvider(base))),
+    );
+
+    final client = c.read(naiClientProvider(base));
+    await withRealHttp(() async {
+      final sub = await client.subscription('tok');
+      expect(sub.anlas, 10);
+      expect(auth, 'Bearer tok');
+
+      final frames = await client
+          .generateImageStream(token: 'tok', body: const {'input': 'x'})
+          .toList();
+      expect(frames.single.isFinal, isTrue);
+      expect(frames.single.bytes, [1, 2, 3]);
+
+      // 关了流式走的那条(生成设置 streamGen = false)
+      final png = await client.generateImage(
+        token: 'tok',
+        body: const {'input': 'x'},
+      );
+      expect(png.take(4), [0x89, 0x50, 0x4e, 0x47]);
+    });
+
+    expect(paths, [
+      '/user/subscription',
+      '/ai/generate-image-stream',
+      '/ai/generate-image',
+    ]);
+  });
+
+  test('非流式生成也能取消:abort 一响就断连接', () async {
+    // 收下请求但永远不回,让取消成为唯一的结束方式
+    final arrived = Completer<void>();
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((_) {
+      if (!arrived.isCompleted) arrived.complete();
+    });
+    addTearDown(() => server.close(force: true));
+
+    final client = NaiClient(base: 'http://127.0.0.1:${server.port}');
+    final abort = GenAbort();
+    await withRealHttp(() async {
+      final pending = client.generateImage(
+        token: 'tok',
+        body: const {'input': 'x'},
+        abort: abort,
+      );
+      await arrived.future; // 请求真在飞了再取消
+      abort.abort();
+      await expectLater(pending, throwsA(isA<NaiException>()));
+    });
+  });
+}
+
+class _RealHttp extends HttpOverrides {}

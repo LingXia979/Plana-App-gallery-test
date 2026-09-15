@@ -40,6 +40,7 @@ class ThemeSettings {
     this.mode = ThemeMode.light,
     this.seedKey = kDefaultSeedKey,
     this.haptics = true,
+    this.showAssistant = true,
   });
 
   final ThemeMode mode;
@@ -48,17 +49,29 @@ class ThemeSettings {
   /// 关掉后 app 内所有振动静默(实际拦在 [Haptics])。
   final bool haptics;
 
+  /// 底栏显不显示「AI」那一格。关掉只是**藏起入口**,助手本身照旧 ——
+  /// 已经导入过的改动、归档的会话都不受影响,开回来还在。
+  ///
+  /// 放在主题设置里是因为它和深浅模式一样要在 ProviderScope 建立之前就读到
+  /// (底栏首帧就得知道画几格),而这份是全 app 唯一一个同步加载的偏好。
+  final bool showAssistant;
+
   ThemeSeed get seed => themeSeeds.firstWhere(
     (s) => s.key == seedKey,
     orElse: () => themeSeeds.firstWhere((s) => s.key == kDefaultSeedKey),
   );
 
-  ThemeSettings copyWith({ThemeMode? mode, String? seedKey, bool? haptics}) =>
-      ThemeSettings(
-        mode: mode ?? this.mode,
-        seedKey: seedKey ?? this.seedKey,
-        haptics: haptics ?? this.haptics,
-      );
+  ThemeSettings copyWith({
+    ThemeMode? mode,
+    String? seedKey,
+    bool? haptics,
+    bool? showAssistant,
+  }) => ThemeSettings(
+    mode: mode ?? this.mode,
+    seedKey: seedKey ?? this.seedKey,
+    haptics: haptics ?? this.haptics,
+    showAssistant: showAssistant ?? this.showAssistant,
+  );
 
   /// 脏数据(旧版本/已下架的档位,如早先那档深蓝)回退默认。
   factory ThemeSettings.fromJson(Map<String, dynamic> j) => ThemeSettings(
@@ -67,12 +80,14 @@ class ThemeSettings {
         ? j['seed'] as String
         : kDefaultSeedKey,
     haptics: j['haptics'] != false,
+    showAssistant: j['showAssistant'] != false,
   );
 
   Map<String, dynamic> toJson() => {
     'mode': mode.name,
     'seed': seedKey,
     'haptics': haptics,
+    'showAssistant': showAssistant,
   };
 
   @override
@@ -80,7 +95,8 @@ class ThemeSettings {
       other is ThemeSettings &&
       other.mode == mode &&
       other.seedKey == seedKey &&
-      other.haptics == haptics;
+      other.haptics == haptics &&
+      other.showAssistant == showAssistant;
 
   @override
   int get hashCode => Object.hash(mode, seedKey, haptics);

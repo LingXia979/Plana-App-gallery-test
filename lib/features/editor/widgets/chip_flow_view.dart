@@ -352,7 +352,10 @@ class _ChipFlowViewState extends State<ChipFlowView>
           behavior: HitTestBehavior.opaque,
           onTap: _tapBlank,
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 24),
+            // 一屏放得下也照样接拖动:编辑页滚动收起顶栏后,靠「顶上往下拽」
+            // 放出来(见 ChromeScrollTracker)
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
             child: Stack(
               key: _stackKey,
               clipBehavior: Clip.none,

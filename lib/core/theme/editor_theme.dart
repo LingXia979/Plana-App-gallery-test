@@ -165,4 +165,24 @@ ThemeData editorTheme(BuildContext context) {
 extension EditorPaletteX on BuildContext {
   EditorPalette get editor =>
       Theme.of(this).extension<EditorPalette>() ?? EditorPalette.light;
+
+  /// 底部 dock(词条栏 / 批量面板 / 补全条)的底色。
+  ///
+  /// 浅色下走 surfaceBright(中性 tone 98,随种子取色):原先的 surfaceContainer
+  /// (92)夹在正文底(96)和 chip 底(89)中间,三层挨着,面板和标签糊成一片;
+  /// 抬到 98 既把面板从正文里拎出来,也让面板内那些灰按钮(86/89)自己站得住。
+  /// 不用 surfaceContainerLowest:本主题把它定在 tone 100,而 100 是整条色阶上
+  /// 唯一 chroma 为 0 的一档 —— 纯白不跟种子走,换主题色时只有这块不变。
+  /// 深色下 surfaceBright 是 tone 24,正好撞上 chip 底,仍用容器色。
+  Color get editorDock {
+    final t = Theme.of(this);
+    return t.brightness == Brightness.dark
+        ? t.colorScheme.surfaceContainer
+        : t.colorScheme.surfaceBright;
+  }
+
+  /// dock 顶边的发丝线。98 只比正文底高 2 阶,光靠明暗托不住边界,
+  /// 补一条线把面板的上沿说清楚。
+  Color get editorDockLine =>
+      Theme.of(this).colorScheme.outlineVariant.withValues(alpha: .5);
 }

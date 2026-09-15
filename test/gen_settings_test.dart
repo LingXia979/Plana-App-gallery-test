@@ -4,8 +4,20 @@ import 'package:plana_app/core/store/gen_settings.dart';
 
 void main() {
   test('生成设置 json 回环', () {
-    const s = GenSettings(retryOn429: false, retryDelaySecs: 0, retryCount: 2);
+    const s = GenSettings(
+      retryOn429: false,
+      retryDelaySecs: 0,
+      retryCount: 2,
+      streamGen: false,
+    );
     expect(GenSettings.fromJson(s.toJson()), s);
+  });
+
+  test('流式生成默认开;老存档没这个字段也按开算', () {
+    expect(const GenSettings().streamGen, isTrue);
+    expect(GenSettings.fromJson({'retryCount': 5}).streamGen, isTrue);
+    expect(GenSettings.fromJson({'streamGen': 'off'}).streamGen, isTrue);
+    expect(GenSettings.fromJson({'streamGen': false}).streamGen, isFalse);
   });
 
   test('脏数据/缺字段回退默认(重试开 · 1 秒 · 3 次)', () {

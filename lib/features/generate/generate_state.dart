@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/store/app_stores.dart';
 import '../vibe_library/naiv4vibe_codec.dart' show kModelToEncodingKey;
+import 'agent_chars.dart';
 import 'char_position.dart';
 import 'gen_modules.dart';
 import 'lora_triggers.dart' show removeLoraTriggersFromPrompt;
@@ -121,6 +122,36 @@ class GenerateNotifier extends Notifier<GenerateState> {
     state = state.copyWith(characters: [...state.characters, ...add]);
     openPanel(Panel.characters);
     return add.length;
+  }
+
+  /// AI 助手整体**替换**角色列表(带名字与站位)。见 [buildAgentCharacters]。
+  ///
+  /// 与 [addCharactersFilled] 的分别在「替换 vs 追加」:AI 每轮产出的是一整份
+  /// characters,追加的话聊三轮就变十二个角色。
+  ///
+  /// **不读现有角色**:站位只认 AI 给的,没给的挑空格(理由见 [buildAgentCharacters])。
+  ///
+  /// 返回 **AI 有没有真的摆过位置**。摆了就得把 `use_coords` 打开
+  /// (由调用方接着调 [setUseCoords]),否则坐标发出去模型一概不理 ——
+  /// 用户看到的会是「AI 说放左边,出图还是随机站位」。
+  bool applyAgentCharacters(
+    List<({String name, String positive, String negative, String position})>
+    items,
+  ) {
+    final built = buildAgentCharacters(
+      items,
+      model: state.params.model,
+      newId: _newId,
+    );
+    state = state.copyWith(characters: built.chars);
+    if (built.chars.isNotEmpty) openPanel(Panel.characters);
+    return built.placed;
+  }
+
+  /// 整体换回一份角色卡(AI 写回的撤销)。**连 id 一起原样恢复**,不重新发号 ——
+  /// 重新发号会让编辑器里开着的那张卡因为找不到原 id 而失焦。
+  void replaceCharacters(List<CharacterPrompt> chars) {
+    state = state.copyWith(characters: List.of(chars));
   }
 
   void updateCharacter(

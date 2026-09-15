@@ -4,16 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/store/ui_prefs.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/ui/pinch_columns.dart';
 import '../../generate/widgets/common.dart' show hintSnack;
 import 'codex_card.dart';
 import 'codex_favorites.dart';
+import 'codex_masonry.dart';
 import 'codex_models.dart';
 import 'codex_providers.dart';
 import 'codex_sheets.dart';
 
 /// 法典浏览器:灵感页选中「法典」分类时的正文。
-/// 顶部选法典 + 来源;下面搜索 + 顶级分类筛选 + 双列瀑布流。只读,点词条看详情。
+/// 顶部选法典 + 来源;下面搜索 + 顶级分类筛选 + 瀑布流(双指捏合换列数)。
+/// 只读,点词条看详情。
 class CodexView extends ConsumerStatefulWidget {
   const CodexView({super.key});
 
@@ -24,12 +28,18 @@ class CodexView extends ConsumerStatefulWidget {
 const _edge = 14.0;
 const _gap = 10.0;
 
-class _CodexViewState extends ConsumerState<CodexView> {
+/// 瀑布流默认列数;捏合可在 1 ~ 4 列之间换。偏好里与标签库四类同表,键 `codex`。
+const _kCols = 2;
+const _kColsKey = 'codex';
+
+class _CodexViewState extends ConsumerState<CodexView>
+    with SingleTickerProviderStateMixin, PinchColumnsMixin {
   String _search = '';
   List<String> _catPath = const []; // 分类树选中路径(空=全部;前缀匹配词条 path)
   Timer? _debounce;
   bool _introScheduled = false; // 首次说明弹窗本会话是否已排期(防重复弹)
   final _scroll = ScrollController();
+  final _masonry = CodexMasonry(gap: _gap);
 
   /// 搜索框要能被程序清空(换法典时),所以不能是裸 TextField。
   final _searchCtrl = TextEditingController();
@@ -41,6 +51,30 @@ class _CodexViewState extends ConsumerState<CodexView> {
     _scroll.dispose();
     super.dispose();
   }
+
+  // ---- 双指捏合改列数(见 PinchColumnsMixin) ----
+
+  @override
+  int get initialGridColumns =>
+      ref.read(uiPrefsProvider).inspirationColumns[_kColsKey] ?? _kCols;
+
+  @override
+  int get minGridColumns => 1;
+
+  @override
+  int get maxGridColumns => 4;
+
+  @override
+  ScrollController get pinchScrollController => _scroll;
+
+  @override
+  void onGridColumnsChanged(int cols) => ref
+      .read(uiPrefsProvider.notifier)
+      .patch(
+        (p) => p.copyWith(
+          inspirationColumns: {...p.inspirationColumns, _kColsKey: cols},
+        ),
+      );
 
   void _onSearch(String v) {
     _debounce?.cancel();
@@ -387,97 +421,53 @@ class _CodexViewState extends ConsumerState<CodexView> {
     );
   }
 
-  Widget _grid(CodexMeta meta, CodexMedia media, List<CodexEntry> entries) {
-    final w = MediaQuery.sizeOf(context).width;
-    final colW = (w - _edge * 2 - _gap) / 2;
-    final (left, right) = _splitColumns(entries, colW);
-    return CustomScrollView(
-      controller: _scroll,
-      physics: const AlwaysScrollableScrollPhysics(),
-      slivers: [
-        SliverCrossAxisGroup(
-          slivers: [
-            _column(
-              meta,
-              media,
-              entries,
-              left,
-              leftPad: _edge,
-              rightPad: _gap / 2,
-            ),
-            _column(
-              meta,
-              media,
-              entries,
-              right,
-              leftPad: _gap / 2,
-              rightPad: _edge,
-            ),
-          ],
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 20)),
-      ],
-    );
-  }
-
-  /// [all] = 当前筛选出的整批(详情页左右滑动就在这批里翻);
-  /// [items] = 本列分到的那部分。
-  Widget _column(
-    CodexMeta meta,
-    CodexMedia media,
-    List<CodexEntry> all,
-    List<CodexEntry> items, {
-    required double leftPad,
-    required double rightPad,
-  }) {
-    // 顶部不留边:筛选行自带下外边距,再留一道就叠出双倍空隙
-    return SliverPadding(
-      padding: EdgeInsets.only(left: leftPad, right: rightPad),
-      sliver: SliverList.builder(
-        itemCount: items.length,
-        itemBuilder: (_, i) => Padding(
-          padding: const EdgeInsets.only(bottom: _gap),
-          child: CodexCard(
-            codex: meta,
-            entry: items[i],
-            media: media,
-            onTap: () {
-              // 瀑布流按列拆过,序号要回到整批里取(左右翻按筛选后的原始顺序)
-              final idx = all.indexWhere((x) => x.id == items[i].id);
-              if (idx < 0) return;
-              showCodexDetailSheet(
-                context,
-                meta,
-                media,
-                entries: all,
-                index: idx,
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 双列瀑布流:按估算高度贪心塞进较矮的一列(用 aspect + 标题条估高)。
-  (List<CodexEntry>, List<CodexEntry>) _splitColumns(
-    List<CodexEntry> items,
-    double colW,
-  ) {
-    final left = <CodexEntry>[], right = <CodexEntry>[];
-    var lh = 0.0, rh = 0.0;
-    for (final e in items) {
-      final h = colW / (e.aspect <= 0 ? 0.75 : e.aspect) + 40;
-      if (lh <= rh) {
-        left.add(e);
-        lh += h;
-      } else {
-        right.add(e);
-        rh += h;
-      }
-    }
-    return (left, right);
-  }
+  /// 瀑布流。几何见 [CodexMasonryLayout];捏合与过渡只重建 pinchBuilder 里那一块,
+  /// 上面的筛选(上万条逐条比对)不跟着每帧重跑。
+  Widget _grid(CodexMeta meta, CodexMedia media, List<CodexEntry> entries) =>
+      pinchLayer(
+        child: pinchBuilder((_) {
+          // 例图按落定列数下的列宽解码(gridColumns 在换档过渡中是起点那一档)
+          final cols = gridColumns;
+          final decodeW =
+              (MediaQuery.sizeOf(context).width -
+                  _edge * 2 -
+                  _gap * (cols - 1)) /
+              cols;
+          return CustomScrollView(
+            controller: _scroll,
+            physics: pinchPhysics(const AlwaysScrollableScrollPhysics()),
+            slivers: [
+              // 顶部不留边:筛选行自带下外边距,再留一道就叠出双倍空隙
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(_edge, 0, _edge, _gap),
+                sliver: SliverGrid(
+                  gridDelegate: zoomGridDelegate(
+                    (n) => _masonry.delegate(entries, n),
+                  ),
+                  delegate: SliverChildBuilderDelegate(
+                    (_, i) => CodexCard(
+                      codex: meta,
+                      entry: entries[i],
+                      media: media,
+                      decodeWidth: decodeW,
+                      // 详情页左右滑动就在当前筛选出的这一整批里翻
+                      onTap: () => showCodexDetailSheet(
+                        context,
+                        meta,
+                        media,
+                        entries: entries,
+                        index: i,
+                      ),
+                    ),
+                    childCount: entries.length,
+                  ),
+                ),
+              ),
+              const SliverToBoxAdapter(child: SizedBox(height: 20)),
+            ],
+          );
+        }),
+      );
 
   Widget _error(String text, VoidCallback onRetry) {
     final scheme = context.scheme;

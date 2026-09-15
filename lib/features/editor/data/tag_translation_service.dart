@@ -106,11 +106,9 @@ class TagTranslationService extends ChangeNotifier {
     try {
       final batch = _pending.take(_batchMax).toList();
       _pending.removeAll(batch);
-      // 入队时查过一次本地缓存还不够:防抖这 700ms 里离线库灌注可能刚好到货。
-      // `warmTagMeta` 要先读 4.7MB asset、再进 isolate 解 9 万行,几百毫秒起步,
-      // 而 `_notifier.load` 在 postFrame 就把提示词喂进来了 —— 进编辑器那第一批
-      // 词多半是「入队时缓存还空着,发之前已经灌好了」。不在这里再滤一道,
-      // 它们就会白跑一趟 lookup,未命中还要接着落到 LLM 那步。
+      // 入队时查过一次本地缓存还不够:防抖这 700ms 里补全那一路可能刚好回填了
+      // 同一批词。不在这里再滤一道,它们就会白跑一趟 lookup,未命中还要接着落到
+      // LLM 那步。
       batch.removeWhere((t) => translationOf(t) != null);
       if (batch.isEmpty) return;
       final cool = _cooldownUntil;

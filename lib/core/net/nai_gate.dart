@@ -5,11 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../auth/nai_keys.dart';
 import 'gen_abort.dart';
 
-/// 闸门发出的一次通行证:用第几把(下标)、用哪个令牌。
+/// 闸门发出的一次通行证:用第几把(下标)、用哪个令牌、打哪台机器。
+///
+/// [base] 跟着那把 Key 走(空串 = 官方):挑哪把是闸门定的,调用方无从自己
+/// 查地址 —— 两处各查一次会在中途增删 Key 时错位,打到别人那台机器上去。
 ///
 /// [token] 为 null = 一把可用的都没有。调用方照常往下走,让它撞到「没有令牌」
 /// 那个错误 —— 卡在等位里没有下文的话,界面上就是「点了没反应」。
-typedef NaiPass = ({int slot, String? token});
+typedef NaiPass = ({int slot, String? token, String base});
 
 /// 直连 NAI 的并发闸门 —— **全 app 共用一份**。
 ///
@@ -65,7 +68,7 @@ class NaiGate {
   Future<NaiPass> acquire({bool paid = false, GenAbort? abort}) async {
     final all = await _all();
     final usable = naiKeysForGenerate(all, paid: paid);
-    if (usable.isEmpty) return (slot: -1, token: null);
+    if (usable.isEmpty) return (slot: -1, token: null, base: '');
 
     // 可用 Key 的全局下标,顺序即优先级 —— 首位那把的点数先被花。
     final idx = [for (final k in usable) all.indexWhere((e) => e.id == k.id)];
@@ -74,7 +77,13 @@ class NaiGate {
     while (abort?.aborted != true) {
       if (_busy.length < cap) {
         for (var i = 0; i < idx.length; i++) {
-          if (_busy.add(idx[i])) return (slot: idx[i], token: usable[i].token);
+          if (_busy.add(idx[i])) {
+            return (
+              slot: idx[i],
+              token: usable[i].token,
+              base: usable[i].endpoint,
+            );
+          }
         }
       }
       final w = Completer<void>();
@@ -85,7 +94,7 @@ class NaiGate {
       });
       await w.future;
     }
-    return (slot: -1, token: null);
+    return (slot: -1, token: null, base: '');
   }
 
   void release(int slot) {
@@ -104,15 +113,16 @@ class NaiGate {
   /// 占着槽跑一段 —— 超分、标签预览这类「一次一趟」的直连调用用它,
   /// 不必自己配对 acquire/release(漏掉 release 会把闸门永久焊死)。
   ///
-  /// 拿不到令牌时 [body] 收到 null,由调用方决定报什么错。
+  /// 拿不到令牌时 [body] 收到 null,由调用方决定报什么错。第二个参数是这把
+  /// Key 的接口地址,直接喂 `naiClientProvider` —— 别另查一次。
   Future<T> run<T>(
-    Future<T> Function(String? token) body, {
+    Future<T> Function(String? token, String base) body, {
     bool paid = false,
     GenAbort? abort,
   }) async {
     final pass = await acquire(paid: paid, abort: abort);
     try {
-      return await body(pass.token);
+      return await body(pass.token, pass.base);
     } finally {
       release(pass.slot);
     }

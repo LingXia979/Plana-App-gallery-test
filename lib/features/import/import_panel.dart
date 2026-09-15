@@ -81,8 +81,9 @@ String? gridPosOfCenter(double? x, double? y) => positionOfCenter(x, y);
 
 /// 这张图每个角色的站位。坐标**照实读** —— 它们到底算不算数,由整张图的
 /// `use_coords` 说了算(见 [ImageMetadata.useCoords]),不是靠坐标反推。
-List<String?> importPositions(List<CharacterMeta> chars) =>
-    [for (final c in chars) positionOfCenter(c.centerX, c.centerY)];
+List<String?> importPositions(List<CharacterMeta> chars) => [
+  for (final c in chars) positionOfCenter(c.centerX, c.centerY),
+];
 
 /// 创作页吸底栏「导入图片」入口:选图 → 推入全屏导入面板。
 Future<void> openImportPanel(BuildContext context) async {
@@ -2027,8 +2028,13 @@ class _ImportImagePanelState extends ConsumerState<ImportImagePanel> {
   Widget _charSection(ColorScheme scheme, ImageMetadata m) {
     final total = m.characters.length;
     final allOn = _charChecked.length == total;
-    // 整批一次算完:站位是**按整张图**判 AUTO 的,而且每行都重算一遍纯属浪费
+    // 整批一次算完,每行都重算一遍纯属浪费
     final positions = importPositions(m.characters);
+    // AUTO 是整张图的档(官方 AI's Choice = use_coords false):坐标照写在元数据
+    // 里,只是出图时模型不理会。徽章得跟着这个档走 —— 否则「AI 自选」出的图导回
+    // 来,面板上凭空写着 C3(第一个角色的出生格心),用户从没摆过那一格;而勾进
+    // 生成页后卡片上又是 AUTO,同一张图两边对不上。
+    final autoPos = m.useCoords != true;
     return _section(
       scheme,
       icon: Icons.group,
@@ -2060,7 +2066,7 @@ class _ImportImagePanelState extends ConsumerState<ImportImagePanel> {
             // 本身就看得出来的信息,占着位置反而把真正有用的格号挤窄。
             _itemRow(
               scheme,
-              tag: positionChipLabel(positions[i]),
+              tag: autoPos ? 'AUTO' : positionChipLabel(positions[i]),
               tagColor: scheme.tertiary,
               text: m.characters[i].prompt,
               checked: _charChecked.contains(i),

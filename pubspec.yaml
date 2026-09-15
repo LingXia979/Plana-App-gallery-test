@@ -24,7 +24,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # 改这里必须同步改 lib/core/app_info.dart 的 kAppVersion / kAppBuild
 # (test/app_info_test.dart 会钉住,对不上直接红)。
 # GitHub 上打的 tag 用 `v1.0.0` —— 检查更新按语义化版本比 tag 与本机 versionName。
-version: 1.0.9+17
+version: 1.1.0+18
 
 environment:
   sdk: ^3.12.2
@@ -59,6 +59,9 @@ dependencies:
   material_color_utilities: ^0.13.0
   unorm_dart: ^0.3.2
   share_plus: ^12.0.2
+  # AI 助手规则文件的导入导出。写法与服务端预设 yaml 一致,两边的段能直接互相复制。
+  yaml: ^3.1.3
+  flutter_onnxruntime: ^1.8.4
 
 dev_dependencies:
   flutter_test:
@@ -108,7 +111,19 @@ flutter:
   # (见 lib/features/gallery/upscale_model_store.dart)。内置会让 APK
   # 多 10.9 MB,更重要的是那等于由本应用再分发授权条款不明的权重。
   assets:
-    - assets/danbooru.tsv
+    # 离线词库索引,由 assets/danbooru.tsv 生成(dart run tool/build_tag_index.dart);
+    # TSV 本身不进包。Android 端不压缩存,见 android/app/build.gradle.kts。
+    - assets/danbooru.tagidx
+    # AI 助手的默认规则主体(预设中间 role → output_specification 那段,按段存,
+    # 带条件段标记)。平时从服务端 GET /api/agent/preset-rules 取最新的,这两份只在
+    # 连不上后端时兜底。由服务端 prompts.load_rules 生成,见 lib/features/assistant/preset_rules.dart。
+    - assets/prompts/nai45.json
+    - assets/prompts/nai5.json
+    # AI 助手的工具层:怎么调工具、系统塞进来的数据块怎么读(tool_layer),以及自定义
+    # 接口那条的出图代码块格式(output_format)。app 自己带,挂在用户选的任意预设上,
+    # 用户写预设不必再抄工具说明。见 lib/features/assistant/preset_rules.dart。
+    - assets/prompts/tool_layer.md
+    - assets/prompts/output_format.md
     # 关于页那颗图标(77 KB)。**不是** icons/app_icon.png —— 那张是给
     # flutter_launcher_icons 用的 1024² 原图,不进包。这张是按自适应图标
     # 的真实几何(背景色 + inset 16% 前景 + 裁到中心 72dp)预合成好的
@@ -117,6 +132,18 @@ flutter:
     # NAI T5 词表 —— 与 web(novelai_web_ui)同一份 JSON,字节级同源拷贝。
     # token 读数与 web 逐数一致的根基,消费方 lib/core/util/nai_tokenizer.dart。
     - assets/t5_tokenizer.json
+    # 自动打码的检测模型:deepghs/anime_censor_detection v1.0_n(YOLOv8,MIT)。
+    # 静态 640×640 导出 + 动态 int8 量化,11.7MB → 3.4MB;实测与 fp32 的
+    # **类别分数通道最大差 0.00001**,检测结果等价。
+    #
+    # **ORT 格式**:运行时是自编的精简构建(见 android/build.gradle.kts),
+    # 精简构建不认 .onnx,只吃 .ort。而且必须用
+    #   convert_onnx_models_to_ort --optimization_style Runtime --enable_type_reduction
+    # 转 —— Runtime 档的运行时优化要配 --minimal_build=extended,类型裁剪则
+    # 对应 --enable_reduced_operator_type_support,两边参数是配套的。
+    #
+    # 换模型时记住:算子表变了要重编运行时(tools/build_ort_aar.py,见 tools/README.md)。
+    - assets/models/censor_n.ort
 
   # To add assets to your application, add an assets section, like this:
   # assets:

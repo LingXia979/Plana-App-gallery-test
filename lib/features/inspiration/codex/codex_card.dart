@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/net/remote_image.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/ui/fade_in_once.dart';
 import 'codex_models.dart';
 
 /// 法典的共用卡片与图片渐显。
@@ -36,6 +37,7 @@ class CodexCard extends StatelessWidget {
     required this.media,
     required this.onTap,
     this.fixedAspect,
+    this.decodeWidth,
   });
 
   final CodexMeta codex;
@@ -46,8 +48,18 @@ class CodexCard extends StatelessWidget {
   /// 覆盖词条自身比例(等比网格用);null = 按词条比例(瀑布流)。
   final double? fixedAspect;
 
+  /// 例图的解码宽(逻辑像素);null = 按布局宽。能换列数的网格按落定的列宽给,
+  /// 换档过渡途中不变 —— 按实时格宽解码的话,那几百毫秒里每一帧都是一路新解码。
+  final double? decodeWidth;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => LayoutBuilder(
+    // 捏到三四列以后卡片很窄:标题收成一行、小一号,不然两行字的渐变条能把
+    // 横图整张盖住。按宽度判,同一屏卡片的字号一致。
+    builder: (context, c) => _card(context, compact: c.maxWidth < 130),
+  );
+
+  Widget _card(BuildContext context, {required bool compact}) {
     final scheme = context.scheme;
     final url = codexImageUrl(codex, entry, media);
     final aspect = fixedAspect ?? (entry.aspect <= 0 ? 0.75 : entry.aspect);
@@ -63,12 +75,16 @@ class CodexCard extends StatelessWidget {
               aspectRatio: aspect,
               child: url == null
                   ? _placeholder(context)
-                  : RemoteImage(
-                      url,
-                      fit: BoxFit.cover,
-                      gaplessPlayback: true,
-                      frameBuilder: codexFadeIn,
-                      errorBuilder: (_, _, _) => _placeholder(context),
+                  : FadeInOnce(
+                      source: url,
+                      builder: (_, frame) => RemoteImage(
+                        url,
+                        fit: BoxFit.cover,
+                        decodeWidth: decodeWidth,
+                        gaplessPlayback: true,
+                        frameBuilder: frame,
+                        errorBuilder: (_, _, _) => _placeholder(context),
+                      ),
                     ),
             ),
             if (url != null)
@@ -77,7 +93,9 @@ class CodexCard extends StatelessWidget {
                 right: 0,
                 bottom: 0,
                 child: Container(
-                  padding: const EdgeInsets.fromLTRB(10, 16, 10, 8),
+                  padding: compact
+                      ? const EdgeInsets.fromLTRB(8, 12, 8, 6)
+                      : const EdgeInsets.fromLTRB(10, 16, 10, 8),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
@@ -90,10 +108,10 @@ class CodexCard extends StatelessWidget {
                   ),
                   child: Text(
                     entry.title,
-                    maxLines: 2,
+                    maxLines: compact ? 1 : 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 12.5,
+                    style: TextStyle(
+                      fontSize: compact ? 11.5 : 12.5,
                       height: 1.25,
                       fontWeight: FontWeight.w700,
                       color: Colors.white,

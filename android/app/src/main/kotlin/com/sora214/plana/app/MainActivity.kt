@@ -1,6 +1,7 @@
 package com.sora214.plana.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
@@ -8,6 +9,8 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    private val documentSaver = DocumentSaver(this)
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         // 启动即建通道:否则装完到第一次生成之间,系统设置里的「通知类别」是空的,
@@ -89,10 +92,42 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // 鸿蒙的安卓兼容容器(卓易通 / 出境易)检测,判法见 HarmonyCompat。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, HARMONY_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "isContainer" -> result.success(HarmonyCompat.isContainer)
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 大文件经系统保存对话框存出去(打包 ZIP):只传路径,原生侧边读边写,见 DocumentSaver。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DOCUMENT_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "saveAs" -> documentSaver.save(
+                        call.argument<String>("path") ?: "",
+                        call.argument<String>("name") ?: "",
+                        call.argument<String>("mime") ?: "application/octet-stream",
+                        result,
+                    )
+
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        // 先交给插件(file_picker 等)照常分发,再看是不是 DocumentSaver 那一单
+        super.onActivityResult(requestCode, resultCode, data)
+        documentSaver.onActivityResult(requestCode, resultCode, data)
     }
 
     companion object {
         private const val CHANNEL = "plana/live_progress"
         private const val UPDATE_CHANNEL = "plana/update"
+        private const val HARMONY_CHANNEL = "plana/harmony_compat"
+        private const val DOCUMENT_CHANNEL = "plana/document"
     }
 }

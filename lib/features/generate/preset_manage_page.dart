@@ -6,7 +6,7 @@ import 'prompt_presets.dart';
 import 'widgets/common.dart';
 import '../../core/util/haptics.dart';
 
-/// 提示词预设管理页:激活切换 + 自定义增删改;默认预设只读可查看。
+/// 提示词预设管理页:激活切换 + 自定义增删改 + 长按拖动排序;默认预设只读可查看。
 /// 入口:高级设置「管理预设」/ 我的页卡片。
 class PromptPresetManagePage extends ConsumerWidget {
   const PromptPresetManagePage({super.key});
@@ -77,35 +77,50 @@ class PromptPresetManagePage extends ConsumerWidget {
       ),
       body: s == null
           ? const Center(child: CircularProgressIndicator())
-          : ListView(
+          // 长按整块拾起来拖 —— 不另立抓手:块上已经有两颗按钮,右边再添一根
+          // 竖条,名字就没地方放了。顺序连高级设置那个下拉一起改。
+          : ReorderableListView(
               padding: const EdgeInsets.fromLTRB(14, 4, 14, 24),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(6, 2, 6, 12),
-                  child: Text(
-                    '激活的预设在生成时自动作为前缀拼进正/负提示词,不占用输入框。'
-                    '默认预设不可修改;右上角可新建自定义预设。',
-                    style: context.texts.bodySmall!.copyWith(
-                      color: scheme.onSurfaceVariant,
-                      height: 1.5,
-                    ),
+              buildDefaultDragHandles: false,
+              proxyDecorator: dragProxy,
+              onReorderStart: dragStartHaptic,
+              onReorderEnd: dragEndHaptic,
+              onReorderItem: (from, to) =>
+                  ref.read(promptPresetsProvider.notifier).reorder(from, to),
+              header: Padding(
+                padding: const EdgeInsets.fromLTRB(6, 2, 6, 12),
+                child: Text(
+                  '激活的预设在生成时自动作为前缀拼进正/负提示词,不占用输入框。'
+                  '默认预设不可修改;右上角可新建自定义预设。',
+                  style: context.texts.bodySmall!.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    height: 1.5,
                   ),
                 ),
-                for (final p in s.presets) ...[
-                  _PresetTile(
-                    preset: p,
-                    active: p.id == s.activeId,
-                    onTap: () {
-                      Haptics.selection();
-                      ref.read(promptPresetsProvider.notifier).setActive(p.id);
-                    },
-                    onEdit: () => _edit(context, ref, preset: p),
-                    onDelete: p.isDefault
-                        ? null
-                        : () => _delete(context, ref, p),
+              ),
+              children: [
+                for (var i = 0; i < s.presets.length; i++)
+                  ReorderableDelayedDragStartListener(
+                    key: ValueKey(s.presets[i].id),
+                    index: i,
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: _PresetTile(
+                        preset: s.presets[i],
+                        active: s.presets[i].id == s.activeId,
+                        onTap: () {
+                          Haptics.selection();
+                          ref
+                              .read(promptPresetsProvider.notifier)
+                              .setActive(s.presets[i].id);
+                        },
+                        onEdit: () => _edit(context, ref, preset: s.presets[i]),
+                        onDelete: s.presets[i].isDefault
+                            ? null
+                            : () => _delete(context, ref, s.presets[i]),
+                      ),
+                    ),
                   ),
-                  const SizedBox(height: 10),
-                ],
               ],
             ),
     );

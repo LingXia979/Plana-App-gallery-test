@@ -24,6 +24,7 @@ class UiPrefs {
     this.galleryDaysFilter = 0,
     this.galleryGroupBy = 'day',
     this.galleryColumns = 3,
+    this.inspirationColumns = const {},
   });
 
   /// 统计页的时间范围(`today` / `week` / `month`)。**统计页与平台页共用一个**
@@ -50,6 +51,13 @@ class UiPrefs {
   /// 系统相册也只有一个缩放档,分开记两份只会让人捏完切个分组又变回去。
   final int galleryColumns;
 
+  /// 灵感页网格的列数(双指捏合调),**每个分类记各的**,键是 `TagCategory` 的
+  /// name,法典是 `codex`;缺键 = 那一类没捏过,用页面的默认列数。
+  ///
+  /// 与图库只记一份相反:四类卡片形状不一样(角色竖、画风横、其余方),同一个
+  /// 列数在各类下的疏密差得很远。各类的上下界跟卡片形状走,由灵感页夹。
+  final Map<String, int> inspirationColumns;
+
   UiPrefs copyWith({
     String? statsRange,
     int? toolsTab,
@@ -58,6 +66,7 @@ class UiPrefs {
     int? galleryDaysFilter,
     String? galleryGroupBy,
     int? galleryColumns,
+    Map<String, int>? inspirationColumns,
   }) => UiPrefs(
     statsRange: statsRange ?? this.statsRange,
     toolsTab: toolsTab ?? this.toolsTab,
@@ -66,6 +75,7 @@ class UiPrefs {
     galleryDaysFilter: galleryDaysFilter ?? this.galleryDaysFilter,
     galleryGroupBy: galleryGroupBy ?? this.galleryGroupBy,
     galleryColumns: galleryColumns ?? this.galleryColumns,
+    inspirationColumns: inspirationColumns ?? this.inspirationColumns,
   );
 
   Map<String, dynamic> toJson() => {
@@ -76,6 +86,7 @@ class UiPrefs {
     'galleryDaysFilter': galleryDaysFilter,
     'galleryGroupBy': galleryGroupBy,
     'galleryColumns': galleryColumns,
+    'inspirationColumns': inspirationColumns,
   };
 
   /// 每一项各自兜底:某一项是垃圾值不该连累其余项(整份丢掉的话,用户会看到
@@ -107,6 +118,13 @@ class UiPrefs {
             kGalleryMaxColumns,
           )
         : 3,
+    // 逐键判型:某一类存坏了只丢那一类
+    inspirationColumns: {
+      if (j['inspirationColumns'] case final Map m)
+        for (final e in m.entries)
+          if (e.key is String && e.value is num)
+            e.key as String: (e.value as num).toInt(),
+    },
   );
 }
 

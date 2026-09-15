@@ -1,4 +1,6 @@
 // UiPrefs 的编解码兜底:每一项各自回默认,一项是垃圾值不连累其余项。
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plana_app/core/store/ui_prefs.dart';
 
@@ -32,6 +34,23 @@ void main() {
     expect(UiPrefs.fromJson({'toolsTab': 'x'}).toolsTab, 0);
     expect(kGalleryMinColumns, 2);
     expect(kGalleryMaxColumns, 5);
+  });
+
+  test('灵感页列数按分类各记各的:往返一致,坏项只丢那一类', () {
+    const p = UiPrefs(inspirationColumns: {'character': 3, 'artist': 1});
+    final back = UiPrefs.fromJson(
+      jsonDecode(jsonEncode(p.toJson())) as Map<String, dynamic>,
+    );
+    expect(back.inspirationColumns, {'character': 3, 'artist': 1});
+
+    final bad = UiPrefs.fromJson({
+      'inspirationColumns': {'character': 'x', 'scene': 4, 'other': 2.0},
+      'galleryColumns': 4,
+    });
+    expect(bad.inspirationColumns, {'scene': 4, 'other': 2});
+    expect(bad.galleryColumns, 4, reason: '一项是垃圾值不该连累其余项');
+    expect(UiPrefs.fromJson({'inspirationColumns': 7}).inspirationColumns, {});
+    expect(UiPrefs.fromJson(const {}).inspirationColumns, {});
   });
 
   test('分组维度认不出的值回「按时间」,不连累别的项', () {

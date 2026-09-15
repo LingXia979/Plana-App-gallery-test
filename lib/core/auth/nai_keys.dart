@@ -3,11 +3,14 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../net/nai_endpoint.dart';
+import '../store/app_stores.dart';
 import 'secure_storage.dart';
 
-/// 能存几把。上限存在的理由是并发 —— 直连并发上限就是 Key 数([NaiGate]),
-/// 手机同时挂八条出图流已经是极限了,再多只会互相拖慢。
-const kMaxNaiKeys = 8;
+/// 能存几把。这个上限只管**存**,不管并发 —— 直连并发等于勾了「并发生成」的
+/// 把数([NaiGate]),存进来没勾的不占并发。所以备用号(过期 / 欠费时换着用的
+/// 那些)尽管存,不会把出图流拖成十几条。
+const kMaxNaiKeys = 16;
 
 /// 一把已保存的 NAI Key。
 class NaiKey {
@@ -16,6 +19,7 @@ class NaiKey {
     required this.token,
     this.label = '',
     this.accessKey,
+    this.endpoint = '',
     this.primary = false,
     this.forGenerate = true,
     this.usePoints = true,
@@ -36,6 +40,17 @@ class NaiKey {
   /// 续期,更糟的是续期会拿这份凭证把**另一把**的令牌换成它所属账号的。
   /// 手贴 pst-/JWT 没有这份,到期只能重贴。
   final String? accessKey;
+
+  /// 这把打哪台机器(已归一,空 = 官方 [kNaiOfficialBase])。
+  ///
+  /// **跟着这把 Key 走**,不是全局一份的设置:第三方中转站各有各的地址和 key,
+  /// 而官方号多半还要照用 —— 全局一份时加一个中转站,官方那几把会被一起带跑
+  /// 偏,且界面上看不出是哪把在打哪儿。整条直连线(生成、超分、Vibe 编码、
+  /// 查点数)都按取到的那把 Key 的地址走。
+  final String endpoint;
+
+  /// 第三方接口(非官方地址)。官方那几把没有这个标记。
+  bool get isThirdParty => endpoint.isNotEmpty;
 
   /// 是不是主账号。**和列表顺序无关** —— 早先拿「排第一」当主账号,于是选中一行
   /// 它就窜到顶上去,跟单选钮的行为完全不搭(单选钮从不会让选项换位置)。
@@ -61,6 +76,7 @@ class NaiKey {
     String? token,
     String? label,
     Object? accessKey = const Object(),
+    String? endpoint,
     bool? primary,
     bool? forGenerate,
     bool? usePoints,
@@ -69,6 +85,7 @@ class NaiKey {
     token: token ?? this.token,
     label: label ?? this.label,
     accessKey: accessKey is String? ? accessKey : this.accessKey,
+    endpoint: endpoint ?? this.endpoint,
     primary: primary ?? this.primary,
     forGenerate: forGenerate ?? this.forGenerate,
     usePoints: usePoints ?? this.usePoints,
@@ -79,6 +96,8 @@ class NaiKey {
     'token': token,
     if (label.isNotEmpty) 'label': label,
     if (accessKey != null) 'accessKey': accessKey,
+    // 官方那几把不落这个字段,老条目读出来就是官方 —— 正好等于升级前的行为。
+    if (endpoint.isNotEmpty) 'ep': endpoint,
     if (primary) 'primary': true,
     // 两个开关只在**非默认**时落盘:默认全开,老条目缺字段读出来就是全开,
     // 正好等于升级前的行为。
@@ -98,6 +117,7 @@ class NaiKey {
       token: token,
       label: j['label'] is String ? j['label'] as String : '',
       accessKey: ak is String && ak.isNotEmpty ? ak : null,
+      endpoint: j['ep'] is String ? normalizeNaiBase(j['ep'] as String) : '',
       // `off` 是上一版的总开关,已并入 forGenerate:那时「停用」就是「完全不用」,
       // 现在「不参与出图」也是完全不用(别的活只找主账号),语义正好对上。
       primary: j['primary'] == true,
@@ -177,12 +197,44 @@ class NaiKeysNotifier extends AsyncNotifier<List<NaiKey>> {
     try {
       final raw = await _storage.read(key: _keysKey);
       // 读出来也过一遍 normalize:老数据里主账号可能带着关掉的开关。
-      if (raw != null && raw.isNotEmpty) return _normalized(_decode(raw));
-      return _normalized(await _migrateLegacy());
+      final list = raw != null && raw.isNotEmpty
+          ? _decode(raw)
+          : await _migrateLegacy();
+      return _normalized(await _adoptLegacyEndpoint(list));
     } catch (_) {
       // Keystore 尚未就绪 / 读取异常 —— 按「没存过」处理,不崩。
       return const [];
     }
+  }
+
+  /// 老用户升级:接口地址曾是**全局一份**的设置,现在跟着每把 Key 走。把那个
+  /// 全局值盖到还没有地址的 Key 上,盖完清掉它 —— 不清的话下次启动会再盖一遍,
+  /// 而那时用户可能已经把某把删了重加成官方的。
+  ///
+  /// 一把都没存时什么都不做:没有地方可盖,清掉反而把用户填过的地址弄丢了。
+  /// 写不进去也原样返回,下次启动再搬(同 [_migrateLegacy] 的顾虑)。
+  Future<List<NaiKey>> _adoptLegacyEndpoint(List<NaiKey> list) async {
+    if (list.isEmpty) return list;
+    final String legacy;
+    try {
+      legacy = normalizeNaiBase(
+        ref.read(prefsStoreProvider).get(kLegacyNaiEndpointKey) ?? '',
+      );
+    } catch (_) {
+      return list; // 无 AppStores(测试)
+    }
+    if (legacy.isEmpty) return list;
+    final next = [
+      for (final k in list)
+        if (k.endpoint.isEmpty) k.copyWith(endpoint: legacy) else k,
+    ];
+    try {
+      await _storage.write(key: _keysKey, value: jsonEncode(next));
+      await ref.read(prefsStoreProvider).delete(key: kLegacyNaiEndpointKey);
+    } catch (_) {
+      return list;
+    }
+    return next;
   }
 
   List<NaiKey> _decode(String raw) {
@@ -254,19 +306,23 @@ class NaiKeysNotifier extends AsyncNotifier<List<NaiKey>> {
 
   List<NaiKey> get _cur => state.value ?? const [];
 
-  /// 加一把。同一个 token 已经在列表里就只更新它的凭证/名字,不重复添加 ——
-  /// 重复的两把指向同一个账号,并发会当成两条放行,正好是 429 的成因。
+  /// 加一把。同一个 token **打同一个地址**已经在列表里,就只更新它的凭证/名字,
+  /// 不重复添加 —— 重复的两把指向同一个账号,并发会当成两条放行,正好是 429 的
+  /// 成因。同一串 key 填了两个地址则是两把:那是两台机器上的两个账号,合并会把
+  /// 其中一台的读数挂到另一台上。
   ///
   /// 返回加/更新后的那把;满了返回 null。
   Future<NaiKey?> add(
     String token, {
     String label = '',
     String? accessKey,
+    String endpoint = '',
   }) async {
     final t = token.trim();
     if (t.isEmpty) return null;
+    final ep = normalizeNaiBase(endpoint);
     final cur = _cur;
-    final i = cur.indexWhere((k) => k.token == t);
+    final i = cur.indexWhere((k) => k.token == t && k.endpoint == ep);
     if (i >= 0) {
       final merged = cur[i].copyWith(
         label: label.isNotEmpty ? label : null,
@@ -281,6 +337,7 @@ class NaiKeysNotifier extends AsyncNotifier<List<NaiKey>> {
       token: t,
       label: label,
       accessKey: accessKey,
+      endpoint: ep,
     );
     await _persist([...cur, k]);
     return k;
@@ -314,6 +371,19 @@ class NaiKeysNotifier extends AsyncNotifier<List<NaiKey>> {
       else
         k,
   ]);
+
+  /// 拖动排序。顺序是**出图取 Key 的先后**(主账号除外,它恒排头),也决定账号页
+  /// 那张卡摆的是哪几块(那里只摆得下前几个)。主账号标记跟着那把 Key 走,
+  /// 拖动不会换人。
+  Future<void> reorder(int from, int to) async {
+    final cur = _cur;
+    if (from == to) return;
+    if (from < 0 || from >= cur.length) return;
+    if (to < 0 || to >= cur.length) return;
+    final next = [...cur];
+    next.insert(to, next.removeAt(from));
+    await _persist(next);
+  }
 
   /// 设为主账号。**不动列表顺序** —— 只是把标记挪过去(两个开关随即被强制全开,
   /// 原主账号降为副账号,见 [_normalized])。

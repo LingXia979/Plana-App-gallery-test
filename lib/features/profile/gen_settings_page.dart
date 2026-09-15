@@ -37,6 +37,17 @@ class GenSettingsPage extends ConsumerWidget {
                 contentPadding: const EdgeInsets.fromLTRB(16, 2, 10, 2),
               ),
               SwitchListTile(
+                value: s.streamGen,
+                onChanged: (v) => patch((x) => x.copyWith(streamGen: v)),
+                title: Text(
+                  '流式生成',
+                  style: context.texts.bodyMedium!.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                contentPadding: const EdgeInsets.fromLTRB(16, 2, 10, 2),
+              ),
+              SwitchListTile(
                 value: s.straightAlpha,
                 onChanged: (v) => patch((x) => x.copyWith(straightAlpha: v)),
                 title: Text(

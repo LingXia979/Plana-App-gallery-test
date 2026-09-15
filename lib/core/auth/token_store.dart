@@ -19,6 +19,12 @@ final naiKeysProvider = FutureProvider<List<String>>((ref) async {
   return [for (final k in keys) k.token];
 });
 
+/// 主账号那把的**完整条目**。需要连接口地址一起知道的调用点用它(查点数、
+/// Vibe 编码):光有令牌不够,第三方那把得打它自己那台机器。
+final primaryNaiKeyProvider = FutureProvider<NaiKey?>(
+  (ref) async => naiPrimaryKey(await ref.watch(naiKeysStoreProvider.future)),
+);
+
 class TokenNotifier extends AsyncNotifier<String?> {
   @override
   Future<String?> build() async {

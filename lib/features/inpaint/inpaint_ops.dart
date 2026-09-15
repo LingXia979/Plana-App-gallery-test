@@ -182,10 +182,8 @@ class MaskGrid {
   }
 }
 
-/// 遮罩涂抹区域的紧凑包围盒(对齐 web `calculateCropRect`):
-/// bbox + [padding],最小 [minSize],clamp 图内;
-/// 面积占比 ≥90% 或无涂抹时返回 null(等效全图,不值得裁)。
-IntRect? tightCropRect(MaskGrid g, {int padding = 128, int minSize = 256}) {
+/// 涂抹格子的包围盒(图像素,贴 8px 网格,夹在图内);无涂抹返回 null。
+IntRect? maskBounds(MaskGrid g) {
   var minGx = g.gw, minGy = g.gh, maxGx = -1, maxGy = -1;
   for (var gy = 0; gy < g.gh; gy++) {
     for (var gx = 0; gx < g.gw; gx++) {
@@ -197,12 +195,27 @@ IntRect? tightCropRect(MaskGrid g, {int padding = 128, int minSize = 256}) {
       }
     }
   }
-  if (maxGx < 0) return null; // 无涂抹
+  if (maxGx < 0) return null;
+  final x = minGx * 8, y = minGy * 8;
+  return (
+    x: x,
+    y: y,
+    w: math.min(g.imgW, (maxGx + 1) * 8) - x,
+    h: math.min(g.imgH, (maxGy + 1) * 8) - y,
+  );
+}
 
-  var x0 = math.max(0, minGx * 8 - padding);
-  var y0 = math.max(0, minGy * 8 - padding);
-  var x1 = math.min(g.imgW, (maxGx + 1) * 8 + padding);
-  var y1 = math.min(g.imgH, (maxGy + 1) * 8 + padding);
+/// 遮罩涂抹区域的紧凑包围盒(对齐 web `calculateCropRect`):
+/// bbox + [padding],最小 [minSize],clamp 图内;
+/// 面积占比 ≥90% 或无涂抹时返回 null(等效全图,不值得裁)。
+IntRect? tightCropRect(MaskGrid g, {int padding = 128, int minSize = 256}) {
+  final m = maskBounds(g);
+  if (m == null) return null; // 无涂抹
+
+  var x0 = math.max(0, m.x - padding);
+  var y0 = math.max(0, m.y - padding);
+  var x1 = math.min(g.imgW, m.x + m.w + padding);
+  var y1 = math.min(g.imgH, m.y + m.h + padding);
 
   // 最小尺寸:不足则向两侧对称扩(贴边时向另一侧让)
   if (x1 - x0 < minSize) {
@@ -249,6 +262,55 @@ IntRect alignSendRect(IntRect tight, int fullW, int fullH) {
   if (tr > x + w) x = math.min(fullW - w, tr - w);
   if (tb > y + h) y = math.min(fullH - h, tb - h);
   return (x: x, y: y, w: w, h: h);
+}
+
+/// 把发送框收进 [maxSide]×[maxSide]([maxSide] 须是 64 的倍数)。
+/// 横竖各自处理,放得下的方向原样返回。
+///
+/// 放不下就在 [rect] 里挑一段 [maxSide] 长的窗口,起点从 rect 起点按 64 步进
+/// (不破坏网格对齐):先尽量多盖 [focus](遮罩本体),再尽量多留 [keep]
+/// (用户拉过的框),都一样时贴着 focus 居中。
+IntRect capSendRect(
+  IntRect rect,
+  int maxSide, {
+  IntRect? focus,
+  IntRect? keep,
+}) {
+  final (x, w) = _capAxis(rect, maxSide, focus, keep, vertical: false);
+  final (y, h) = _capAxis(rect, maxSide, focus, keep, vertical: true);
+  return (x: x, y: y, w: w, h: h);
+}
+
+/// [capSendRect] 的单方向版本,返回 (起点, 长度)。
+(int, int) _capAxis(
+  IntRect rect,
+  int cap,
+  IntRect? focus,
+  IntRect? keep, {
+  required bool vertical,
+}) {
+  int at(IntRect r) => vertical ? r.y : r.x;
+  int len(IntRect r) => vertical ? r.h : r.w;
+  final pos = at(rect), span = len(rect);
+  if (span <= cap) return (pos, span);
+  // 窗口 [s, s+cap) 与 r 在这个方向上重叠的长度
+  int cover(int s, IntRect? r) => r == null
+      ? 0
+      : math.max(0, math.min(s + cap, at(r) + len(r)) - math.max(s, at(r)));
+  final center = focus == null ? pos + span / 2 : at(focus) + len(focus) / 2;
+  var best = pos, bestF = -1, bestK = -1;
+  var bestD = double.infinity;
+  for (var s = pos; s + cap <= pos + span; s += 64) {
+    final f = cover(s, focus), k = cover(s, keep);
+    final d = (s + cap / 2 - center).abs();
+    if (f > bestF || (f == bestF && (k > bestK || (k == bestK && d < bestD)))) {
+      best = s;
+      bestF = f;
+      bestK = k;
+      bestD = d;
+    }
+  }
+  return (best, cap);
 }
 
 /// 网格导出黑白 mask PNG(白=重绘区)。[region] 非空时输出该区域
@@ -415,15 +477,21 @@ Future<Uint8List> pasteBack({
   return data!.buffer.asUint8List();
 }
 
-/// 重绘编辑器的工具偏好:笔刷粗细、重绘强度、偏位套杆。
+/// 重绘编辑器的工具偏好。
 ///
-/// 只记**手感类**的三项。画笔/橡皮、局部、扩图这些是「这一张要怎么处理」,
-/// 每次进来都该从干净状态起步,记住反而碍事。
+/// 只记**「我习惯怎么用」**,不记**「这一张要怎么处理」**。所以:
+///  * 记:笔刷、强度、偏位、上次停在哪一档、打码的样式与颜色;
+///  * 不记:画笔/橡皮(上次停在橡皮的话,下次进来空遮罩选着橡皮,什么也擦不了)、
+///    局部框(那是这一张发多大范围)、马赛克块大小(**故意**每次按图长边重算,
+///    记住会让不同尺寸的图强度乱跳)。
 class InpaintPrefs {
   const InpaintPrefs({
     this.brush = 50, // 笔刷直径(图像素),对齐 web 默认
     this.strength = 0.7,
     this.assist = false,
+    this.mode = 'paint',
+    this.censorStyle = 'mosaic',
+    this.censorColor = 0xFF000000,
   });
 
   final double brush;
@@ -432,16 +500,38 @@ class InpaintPrefs {
   /// 偏位套杆:光标偏于触点上方,手指不挡涂抹点。用不用是个人习惯。
   final bool assist;
 
+  /// 上次停在哪一档:`paint` / `expand` / `censor`。
+  ///
+  /// **存字符串而不是枚举下标** —— 下标会随枚举顺序变动而错位,而这份数据
+  /// 是要跨版本读回来的。认不出的值一律回落 `paint`。
+  final String mode;
+
+  /// 打码样式:`mosaic` / `solid`。同样存字符串,理由同上。
+  final String censorStyle;
+
+  /// 打码的纯色填充色(0xAARRGGBB)。
+  final int censorColor;
+
   Map<String, dynamic> toJson() => {
     'brush': brush,
     'strength': strength,
     'assist': assist,
+    'mode': mode,
+    'censorStyle': censorStyle,
+    'censorColor': censorColor,
   };
 
   factory InpaintPrefs.fromJson(Map<String, dynamic> j) => InpaintPrefs(
     brush: ((j['brush'] as num?)?.toDouble() ?? 50).clamp(4, 400),
     strength: ((j['strength'] as num?)?.toDouble() ?? 0.7).clamp(0.01, 1.0),
     assist: j['assist'] == true,
+    mode: switch (j['mode']) {
+      'expand' => 'expand',
+      'censor' => 'censor',
+      _ => 'paint',
+    },
+    censorStyle: j['censorStyle'] == 'solid' ? 'solid' : 'mosaic',
+    censorColor: (j['censorColor'] as num?)?.toInt() ?? 0xFF000000,
   );
 }
 

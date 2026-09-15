@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/store/app_stores.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/ui/param_input.dart';
 import '../generate/gen_modules.dart';
@@ -13,7 +14,12 @@ import '../generate/generate_state.dart';
 import '../generate/models.dart';
 import '../generate/res_rules.dart' show kFreePixelThreshold;
 import '../generate/widgets/common.dart' show hintSnack;
+import '../gallery/gallery_state.dart';
+import '../gallery/models.dart' show ResultBadge;
 import '../shell/shell_state.dart';
+import 'censor_detect.dart';
+import 'censor_infer.dart';
+import 'censor_ops.dart';
 import 'inpaint_ops.dart';
 import '../../core/util/haptics.dart';
 
@@ -25,6 +31,9 @@ const _maskFill = Color(0x8CA855F7); // 遮罩填充 ~55% 紫
 
 /// NAI img2img/inpaint 像素上限(与 img2imgResolution 一致)。
 const _maxSendPixels = 1024 * 3072;
+
+/// 局部框单边上限(框即发送尺寸)。
+const _cropMaxSide = 1024;
 
 /// 一次重绘编辑会话:进入编辑器所需的底图。
 ///
@@ -61,12 +70,17 @@ class InpaintSessionNotifier extends Notifier<InpaintSession?> {
 
 enum _Tool { brush, eraser }
 
+/// 顶栏三档。**共用同一张遮罩和同一套涂抹手势** —— 涂一次,既可以送去重绘,
+/// 也可以就地打码,不必退出面板换个工具重涂一遍。
+///
+/// 重绘/扩图是「攒任务回创作页生成」,打码是**本地即时出图**(不走网络、不扣点),
+/// 所以只有 CTA 那一步分岔,前面的交互完全一样。
+enum _Mode { paint, expand, censor }
+
 /// 偏位套杆:手指把手与笔刷光标的屏幕间距(手指不挡涂抹点)。
 const _assistGapPx = 110.0;
 
-enum _SliderTarget { brush, strength }
-
-enum _CropEdge { left, top, right, bottom }
+enum _SliderTarget { brush, strength, block }
 
 enum _ExpandHandle { top, bottom, left, right }
 
@@ -117,10 +131,12 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   /// 用户拉过边 —— 之后 [_autoCrop] 只扩不缩,不再把框收回遮罩大小。
   bool _cropResized = false;
 
-  _CropEdge? _cropDrag;
+  /// 正在拖的边/角:h 管左右(-1 左、1 右),v 管上下(-1 上、1 下),0 = 该方向不动。
+  /// 角就是 h、v 都不为 0。
+  ({int h, int v})? _cropDrag;
   IntRect? _cropStart;
   Offset? _cropDragFrom;
-  IntRect? _crop; // 发送框(w/h 恒 64 倍数)
+  IntRect? _crop; // 发送框(w/h 恒 64 倍数,单边 ≤ _cropMaxSide)
   double _brush = 50; // 笔刷直径(图像素),对齐 web 默认
   double _strength = 0.7;
   _SliderTarget? _slider;
@@ -130,8 +146,26 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   /// 上一次算出的 Vibe 编码费(同 BottomActionBar._lastVibeFee):查询键一变
   /// 就从 loading 重来,取值 null 时沿用旧值,免得费用在参数连改时来回跳。
 
+  _Mode _mode = _Mode.paint;
+  bool get _expandMode => _mode == _Mode.expand;
+  bool get _censorMode => _mode == _Mode.censor;
+
+  // 打码(本地即时):样式 + 块大小(格,1 格 = 8px)。块大小进模式时按图长边
+  // 给默认值 —— 写死像素的话同一档在 512 和 2048 的图上强度差四倍。
+  CensorStyle _censorStyle = CensorStyle.mosaic;
+  int _censorBlock = 4;
+  int _censorColor = kCensorColorDefault; // 纯色档的填充色
+
+  /// 整图马赛克底片:画布按遮罩格从这上面取样 = 所见即所得。
+  ///
+  /// 底片的块和最终出图对齐同一套网格,所以预览与结果逐像素一致 ——
+  /// 不是"意思意思画个灰块"。块大小改动后重算,拖滑杆期间防抖。
+  ui.Image? _censorPreview;
+  int _censorPreviewBlock = -1;
+  Timer? _censorDebounce;
+  bool _detecting = false; // 自动识别进行中(按钮置灰,防连点)
+
   // 扩图模式(对齐 web:四向 padding 恒 64 倍数,发送=白底扩后画布)
-  bool _expandMode = false;
   int _padL = 0, _padT = 0, _padR = 0, _padB = 0;
   _ExpandHandle? _expandDrag;
   int _expandStartPad = 0;
@@ -190,19 +224,55 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   @override
   void initState() {
     super.initState();
-    // 上次的手感(笔刷/强度/偏位)。同步取值,面板一开就是对的,
-    // 不会先画一帧默认值再跳。
+    // 上次的手感。同步取值,面板一开就是对的,不会先画一帧默认值再跳。
     final p = ref.read(inpaintPrefsProvider);
     _brush = p.brush;
     _strength = p.strength;
     _assist = p.assist;
+    _censorStyle = p.censorStyle == 'solid'
+        ? CensorStyle.solid
+        : CensorStyle.mosaic;
+    _censorColor = p.censorColor;
+    // 模式要等图解出来才敢定(扩图要求 64 对齐、打码要按图算块大小),
+    // 见 _decode 末尾的 _restoreMode。
     _decode();
   }
 
   /// 关面板时把手感存一次(滑杆每一跳都写等于每帧落一次盘)。
   void _savePrefs() => ref
       .read(inpaintPrefsProvider.notifier)
-      .save(InpaintPrefs(brush: _brush, strength: _strength, assist: _assist));
+      .save(
+        InpaintPrefs(
+          brush: _brush,
+          strength: _strength,
+          assist: _assist,
+          mode: switch (_mode) {
+            _Mode.paint => 'paint',
+            _Mode.expand => 'expand',
+            _Mode.censor => 'censor',
+          },
+          censorStyle: _censorStyle == CensorStyle.solid ? 'solid' : 'mosaic',
+          censorColor: _censorColor,
+        ),
+      );
+
+  /// 恢复上次停留的档。**不走 [_setMode]** —— 那条路会弹提示、重置视角,
+  /// 是给「用户点了 tab」用的;这里是开面板时的静默还原。
+  ///
+  /// 扩图对图有 64 对齐的硬要求,对不上就老实回落涂抹档,不弹提示打扰人。
+  void _restoreMode(ui.Image img) {
+    final want = ref.read(inpaintPrefsProvider).mode;
+    if (want == 'expand') {
+      if (img.width % 64 != 0 || img.height % 64 != 0) return;
+      setState(() => _mode = _Mode.expand);
+      return;
+    }
+    if (want != 'censor') return;
+    _censorBlock = defaultCensorBlock(img.width, img.height);
+    setState(() => _mode = _Mode.censor);
+    unawaited(_rebuildCensorPreview());
+    unawaited(warmUpCensorSession());
+  }
 
   /// 先解码、图就位后才播入场动画:渐显第一帧画布即完整,避免
   /// 「底色/加载圈 → 图突现」的闪烁。解码失败直接退出会话(防锁死)。
@@ -219,6 +289,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
         _grid = MaskGrid(frame.image.width, frame.image.height);
       });
       _restoreMask();
+      _restoreMode(frame.image);
       unawaited(_ac.forward());
     } catch (_) {
       if (mounted) ref.read(inpaintSessionProvider.notifier).close();
@@ -240,11 +311,13 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
 
   @override
   void dispose() {
+    _censorDebounce?.cancel();
     _curve.dispose();
     _ac.dispose();
     _img?.dispose();
     _prevImg?.dispose();
     _previewImg?.dispose();
+    _censorPreview?.dispose();
     super.dispose();
   }
 
@@ -370,32 +443,39 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   /// 大图省点数要走局部框,但**等落笔之后**才开 —— 原来是一进来就按分辨率
   /// 开,还没画就先框住半张图挡视线,框的位置跟你要改的地方也毫无关系。
   /// 按遮罩算,位置天然是对的,也不会出现"第二笔画到框外被静默丢掉"。
+  ///
+  /// 单边封顶 [_cropMaxSide]:遮罩比这还大时框只能盖住其中一段。
   void _autoCrop() {
-    if (_expandMode) return;
+    // 局部框是「发送范围」,只有涂抹模式有意义 —— 打码不发送,让它自动弹出来
+    // 只会拿黄框和框外 40% 暗化盖住打码预览。
+    if (_mode != _Mode.paint) return;
     final img = _img, grid = _grid;
     if (img == null || grid == null) return;
     final tight = tightCropRect(grid);
     if (tight == null) return; // 擦空了:框留在原处,别闪
-    final want = alignSendRect(tight, img.width, img.height);
     if (!_cropMode) {
       // 还没开:小图本来就不用开,手动关过的也不再替他打开
       if (_cropOptOut || img.width * img.height <= kFreePixelThreshold) return;
       _cropMode = true;
-      _crop = want;
-      return;
     }
-    final cur = _crop;
-    if (cur == null || !_cropResized) {
-      _crop = want;
-      return;
+    var want = alignSendRect(tight, img.width, img.height);
+    final keep = _cropResized ? _crop : null;
+    if (keep != null) {
+      // 拉过边的框归用户:只扩不缩 —— 尊重他要的留白,同时让涂到框外的
+      // 地方也进框(发送时按框裁遮罩,框外那部分等于没画)。
+      final x = math.min(keep.x, want.x);
+      final y = math.min(keep.y, want.y);
+      final r = math.max(keep.x + keep.w, want.x + want.w);
+      final b = math.max(keep.y + keep.h, want.y + want.h);
+      want = (x: x, y: y, w: r - x, h: b - y);
     }
-    // 拉过边的框归用户:只扩不缩 —— 尊重他要的留白,同时保证涂到框外的
-    // 地方不会被静默丢掉(发送时按框裁遮罩,框外那部分等于没画)。
-    final x = math.min(cur.x, want.x);
-    final y = math.min(cur.y, want.y);
-    final r = math.max(cur.x + cur.w, want.x + want.w);
-    final b = math.max(cur.y + cur.h, want.y + want.h);
-    _crop = (x: x, y: y, w: r - x, h: b - y);
+    // 超过上限时:先尽量多盖遮罩,再尽量留住他拉的框
+    _crop = capSendRect(
+      want,
+      _cropMaxSide,
+      focus: maskBounds(grid),
+      keep: keep,
+    );
   }
 
   void _undoOnce() {
@@ -428,25 +508,36 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     _padB = 0;
   }
 
-  /// 切换涂抹/扩图模式(对齐 web:互斥局部,进出都重置扩展;
-  /// 本会话生成进行中不切,防止预览状态错乱)。
-  void _setExpandMode(bool on) {
+  /// 切模式(对齐 web:互斥局部,进出都重置扩展;本会话生成进行中不切,
+  /// 防止预览状态错乱)。
+  ///
+  /// **遮罩不清** —— 三档共用同一张,切过去接着用就是这个功能的意义。
+  void _setMode(_Mode m) {
     final img = _img;
-    if (img == null || _expandMode == on) return;
+    if (img == null || _mode == m) return;
     if (_previewDst != null) {
       hintSnack(context, '生成进行中,请稍候', icon: Icons.hourglass_top);
       return;
     }
-    if (on && (img.width % 64 != 0 || img.height % 64 != 0)) {
+    if (m == _Mode.expand && (img.width % 64 != 0 || img.height % 64 != 0)) {
       hintSnack(context, '图片尺寸非 64 对齐,无法扩图', icon: Icons.straighten);
       return;
     }
+    if (m == _Mode.censor) {
+      // 打码是本地重画像素,和「涂完看结果只描轮廓」那套无关 —— 一进来就
+      // 恢复实心显示,否则遮罩是轮廓、预览又是实心,两套语义打架。
+      _maskAsOutline = false;
+      _censorBlock = defaultCensorBlock(img.width, img.height);
+      unawaited(_rebuildCensorPreview());
+      // 首次加载要解压 + 建会话 —— 进档就在后台读好,别等用户点了才开始
+      unawaited(warmUpCensorSession());
+    }
     setState(() {
-      _expandMode = on;
+      _mode = m;
       _resetPad();
       _slider = null;
       _viewport = Size.zero; // 强制重 fit + 居中(web 切换时重置视角同款)
-      if (on) {
+      if (m != _Mode.paint) {
         _cropMode = false;
         _crop = null;
       }
@@ -563,22 +654,27 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
       return;
     }
     final img = _img!;
-    final tight = tightCropRect(_grid!);
+    final grid = _grid!;
+    final tight = tightCropRect(grid);
     setState(() {
       _cropOptOut = false;
       _cropResized = false;
       _cropMode = true;
       // 有涂抹按遮罩算框;还没涂就先给个居中框占位,落笔后自动跟上
       _crop = tight != null
-          ? alignSendRect(tight, img.width, img.height)
+          ? capSendRect(
+              alignSendRect(tight, img.width, img.height),
+              _cropMaxSide,
+              focus: maskBounds(grid),
+            )
           : _defaultCrop(img.width, img.height);
     });
   }
 
-  /// 居中默认框(约 55% 边长、64 对齐,原点也落 64 网格)。
+  /// 居中默认框(约 55% 边长、不超过上限、64 对齐,原点也落 64 网格)。
   IntRect _defaultCrop(int imgW, int imgH) {
-    final w = _snap64(imgW * 0.55, max: imgW);
-    final h = _snap64(imgH * 0.55, max: imgH);
+    final w = _snap64(imgW * 0.55, max: math.min(imgW, _cropMaxSide));
+    final h = _snap64(imgH * 0.55, max: math.min(imgH, _cropMaxSide));
     return (
       x: (imgW - w) ~/ 2 ~/ 64 * 64,
       y: (imgH - h) ~/ 2 ~/ 64 * 64,
@@ -587,9 +683,10 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     );
   }
 
-  /// 边缘拉杆命中:只认贴着四条边的一条窄带(屏幕 26px),框内一律落笔。
+  /// 拉杆命中:四条边各一条窄带(屏幕 26px),横竖两条带交叠的四个角
+  /// 两条边一起拉;框内其余地方一律落笔。
   /// 整框移动没有 —— 框跟着遮罩走,移开就失去意义,而且会把"框内能涂"吃掉。
-  bool _hitCropEdge(Offset imgPoint) {
+  bool _hitCropHandle(Offset imgPoint) {
     final c = _crop;
     if (c == null) return false;
     final band = 26 / _scale;
@@ -602,50 +699,57 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
         imgPoint.dy > b + band) {
       return false;
     }
-    final d = <_CropEdge, double>{
-      _CropEdge.left: (imgPoint.dx - l).abs(),
-      _CropEdge.right: (imgPoint.dx - r).abs(),
-      _CropEdge.top: (imgPoint.dy - t).abs(),
-      _CropEdge.bottom: (imgPoint.dy - b).abs(),
-    };
-    var best = _CropEdge.left;
-    for (final e in d.entries) {
-      if (e.value < d[best]!) best = e.key;
-    }
-    if (d[best]! > band) return false;
-    _cropDrag = best;
+    final dl = (imgPoint.dx - l).abs(), dr = (imgPoint.dx - r).abs();
+    final dt = (imgPoint.dy - t).abs(), db = (imgPoint.dy - b).abs();
+    // 每个方向只认近的那条边(框在屏幕上很窄时两条都可能在带内)
+    final h = math.min(dl, dr) > band ? 0 : (dl <= dr ? -1 : 1);
+    final v = math.min(dt, db) > band ? 0 : (dt <= db ? -1 : 1);
+    if (h == 0 && v == 0) return false;
+    _cropDrag = (h: h, v: v);
     _cropStart = c;
     _cropDragFrom = imgPoint;
     return true;
   }
 
   void _updateCropDrag(Offset imgPoint) {
-    final start = _cropStart, from = _cropDragFrom, img = _img;
-    if (start == null || from == null || img == null) return;
-    final dx = imgPoint.dx - from.dx;
-    final dy = imgPoint.dy - from.dy;
-    // 对边固定,拖的那条边动;宽高 64 步进、最小 256
-    final IntRect next;
-    switch (_cropDrag!) {
-      case _CropEdge.left:
-        final anchor = start.x + start.w;
-        final w = _snap64(anchor - (start.x + dx), max: anchor);
-        next = (x: anchor - w, y: start.y, w: w, h: start.h);
-      case _CropEdge.right:
-        final w = _snap64(start.w + dx, max: img.width - start.x);
-        next = (x: start.x, y: start.y, w: w, h: start.h);
-      case _CropEdge.top:
-        final anchor = start.y + start.h;
-        final h = _snap64(anchor - (start.y + dy), max: anchor);
-        next = (x: start.x, y: anchor - h, w: start.w, h: h);
-      case _CropEdge.bottom:
-        final h = _snap64(start.h + dy, max: img.height - start.y);
-        next = (x: start.x, y: start.y, w: start.w, h: h);
-    }
+    final drag = _cropDrag, start = _cropStart, from = _cropDragFrom;
+    final img = _img;
+    if (drag == null || start == null || from == null || img == null) return;
+    // 对边固定,拖的边动;角 = 横竖各拖一条。宽高 64 步进、256 ~ 上限
+    final (x, w) = _dragSpan(
+      start.x,
+      start.w,
+      imgPoint.dx - from.dx,
+      drag.h,
+      img.width,
+    );
+    final (y, h) = _dragSpan(
+      start.y,
+      start.h,
+      imgPoint.dy - from.dy,
+      drag.v,
+      img.height,
+    );
+    final next = (x: x, y: y, w: w, h: h);
     if (next != _crop) {
       _cropResized = true;
       setState(() => _crop = next);
     }
+  }
+
+  /// 单方向拉伸,返回 (起点, 长度)。[side] -1 拖起始边(左/上)、1 拖末端边
+  /// (右/下)、0 不动;[limit] 是图在这个方向的尺寸。
+  (int, int) _dragSpan(int pos, int len, double delta, int side, int limit) {
+    if (side < 0) {
+      final end = pos + len; // 末端固定
+      final l = _snap64(len - delta, max: math.min(end, _cropMaxSide));
+      return (end - l, l);
+    }
+    if (side > 0) {
+      final l = _snap64(len + delta, max: math.min(limit - pos, _cropMaxSide));
+      return (pos, l);
+    }
+    return (pos, len);
   }
 
   // ---------- 手势 ----------
@@ -662,7 +766,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
         return;
       }
       final p = _toImg(d.localFocalPoint);
-      if (_cropMode && _hitCropEdge(p)) return;
+      if (_cropMode && _hitCropHandle(p)) return;
       // 不立即落笔:双指缩放时第一指总会先到一拍,等移动/抬手再确认涂抹
       _pendingStroke = _cursorFor(p);
       if (_assist) setState(() => _fingerAt = p); // 立即显示把手与偏位光标
@@ -823,10 +927,242 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     _close();
   }
 
+  // ---------- 打码 ----------
+
+  /// 重算整图马赛克底片(画布取样用)。块大小没变就复用。
+  ///
+  /// 满遮罩跑一遍 [censorPng] 得到的底片,和最终出图对齐**同一套 8px 网格**,
+  /// 所以按遮罩格从它上面取样画出来的预览与结果逐像素相同 —— 不是近似示意。
+  Future<void> _rebuildCensorPreview() async {
+    final img = _img;
+    if (img == null) return;
+    final block = _censorBlock;
+    if (_censorPreviewBlock == block && _censorPreview != null) return;
+    final full = MaskGrid(img.width, img.height);
+    full.cells.fillRange(0, full.cells.length, 1);
+    try {
+      final png = await censorPng(
+        _currentBytes,
+        full.encode(),
+        style: CensorStyle.mosaic,
+        block: block,
+      );
+      if (!mounted) return;
+      final codec = await ui.instantiateImageCodec(png);
+      final frame = await codec.getNextFrame();
+      // 等这一趟的功夫用户又拖了滑杆 —— 这张已经过期,直接扔
+      if (!mounted || _censorBlock != block) {
+        frame.image.dispose();
+        return;
+      }
+      final old = _censorPreview;
+      setState(() {
+        _censorPreview = frame.image;
+        _censorPreviewBlock = block;
+      });
+      // 旧底片延到下一帧再放:当场 dispose 有可能砍掉一张还没光栅化的
+      // 帧里正引用着的图。
+      if (old != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
+      }
+    } catch (_) {
+      // 预览失败不拦功能:画布退回实心遮罩,打码本身照常能出图
+    }
+  }
+
+  /// 自动预填:检测 → 把框刷进遮罩。
+  ///
+  /// **只预填,不出图。** 模型 F1 约 0.80(大概每 6 个目标漏 1 个),够不上
+  /// 无人值守;人始终在回路里 —— 涂/擦/撤销全都照常,撤销一步就回到手动。
+  Future<void> _autoDetect() async {
+    final grid = _grid;
+    final img = _img;
+    if (grid == null || img == null || _detecting) return;
+    setState(() => _detecting = true);
+    try {
+      // 直接喂**已经原生解码好**的这张位图,别再让检测层去解一遍 PNG:
+      // 那是纯 Dart 解码,一张 1216×832 就要几百毫秒。
+      final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (bd == null || !mounted) return;
+      final boxes = await detectCensorBoxes(
+        bd.buffer.asUint8List(),
+        img.width,
+        img.height,
+      );
+      if (!mounted) return;
+      if (boxes.isEmpty) {
+        hintSnack(context, '没检测到需要打码的区域', icon: Icons.search_off);
+        return;
+      }
+      _pushUndo(); // 预填当成一次可撤销的编辑
+      final n = paintBoxes(grid, boxes);
+      _maskTouched();
+      setState(() => _rev++);
+      hintSnack(
+        context,
+        '检测到 ${boxes.length} 处,已预填',
+        icon: Icons.auto_fix_high,
+      );
+      if (n == 0) return;
+    } catch (e) {
+      if (mounted) hintSnack(context, '自动识别失败: $e', icon: Icons.error_outline);
+    } finally {
+      if (mounted) setState(() => _detecting = false);
+    }
+  }
+
+  /// 选纯色档的填充色。预设四档灰阶,见 [kCensorColors] 的取舍说明。
+  Future<void> _pickCensorColor() async {
+    final scheme = context.scheme;
+    final picked = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: scheme.surfaceContainer,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('打码颜色', style: ctx.texts.titleMedium),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  for (final (c, name) in kCensorColors)
+                    Expanded(
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => Navigator.of(ctx).pop(c),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          child: Column(
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  color: Color(c),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: c == _censorColor
+                                        ? scheme.primary
+                                        : scheme.outlineVariant,
+                                    width: c == _censorColor ? 3 : 1,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(name, style: ctx.texts.labelMedium),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    Haptics.selection();
+    setState(() => _censorColor = picked);
+  }
+
+  void _toggleCensorStyle() {
+    Haptics.selection();
+    setState(() {
+      _censorStyle = _censorStyle == CensorStyle.mosaic
+          ? CensorStyle.solid
+          : CensorStyle.mosaic;
+      // 纯色没有块大小可调,滑杆开着就收起来
+      if (_censorStyle == CensorStyle.solid && _slider == _SliderTarget.block) {
+        _slider = null;
+      }
+    });
+  }
+
+  /// 改块大小。拖滑杆期间防抖,不每帧跑整图。
+  void _setCensorBlock(int v) {
+    final b = v.clamp(kCensorBlockMin, kCensorBlockMax);
+    if (b == _censorBlock) return;
+    setState(() => _censorBlock = b);
+    _censorDebounce?.cancel();
+    _censorDebounce = Timer(
+      const Duration(milliseconds: 240),
+      () => unawaited(_rebuildCensorPreview()),
+    );
+  }
+
+  /// 就地打码 → 存入图库新的一张。
+  ///
+  /// **原图一个字节不动**:原图是用户资产,打码是派生品 —— 和放大那条路
+  /// 一致(见 result_canvas 的 `_upscale`)。也因此不走 [_fire] 那套
+  /// 「攒任务回创作页生成」:本地重画像素,不联网、不扣点、当场出结果。
+  Future<void> _fireCensor() async {
+    final grid = _grid;
+    final img = _img;
+    if (grid == null || img == null || _firing) return;
+    if (grid.isEmpty) {
+      hintSnack(context, '先涂抹要打码的区域', icon: Icons.brush);
+      return;
+    }
+    setState(() => _firing = true);
+    try {
+      final png = await censorPng(
+        _currentBytes,
+        grid.encode(),
+        style: _censorStyle,
+        block: _censorBlock,
+        color: _censorColor,
+      );
+      if (!mounted) return;
+      // 沿用源图的 seed 与参数快照(找不到源就记 0、不带快照):打码不改变
+      // "这张图当初是怎么抽出来的",和放大那条路一致。**不能记 [_liveInput]**:
+      // 那是创作页此刻的参数,拿去复用或导出元数据就串成了别的图。
+      var seed = 0;
+      GenerateState? input;
+      for (final r in ref.read(galleryProvider).results) {
+        if (r.id == widget.session.sourceId) {
+          seed = r.seed;
+          input =
+              r.input ??
+              (r.hasInput
+                  ? await ref.read(appStoresProvider).gallery.readInput(r.id)
+                  : null);
+          break;
+        }
+      }
+      if (!mounted) return;
+      ref
+          .read(galleryProvider.notifier)
+          .addResult(
+            bytes: png,
+            width: img.width,
+            height: img.height,
+            seed: seed,
+            badge: ResultBadge.censored,
+            input: input,
+          );
+      if (!mounted) return;
+      hintSnack(context, '已打码并存入图库', icon: Icons.check_circle_outline);
+      await _close();
+    } catch (e) {
+      if (mounted) hintSnack(context, '打码失败: $e', icon: Icons.error_outline);
+    } finally {
+      if (mounted) setState(() => _firing = false);
+    }
+  }
+
   Future<void> _fire() async {
     final img = _img;
     final grid = _grid;
     if (img == null || grid == null || _firing) return;
+    // 打码在模型门禁**之前**分岔:本地重画像素,跟用哪个模型、能不能 infill
+    // 一点关系都没有 —— Anima/Krea 下也该照样能打。
+    if (_censorMode) return _fireCensor();
     // 参数现读创作页,模型自然也跟着走:面板开着的时候完全可以切去换成
     // Anima / Krea(那两条通道都没有 infill)。进面板时 result_canvas 已拦过
     // 一道,这里补发车前的第二道 —— 否则会一路走到生成器里才报不支持。
@@ -1042,6 +1378,20 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                                                 : _previewImg,
                                             previewDst: _previewDst,
                                             previewClip: _previewClip,
+                                            // 打码所见即所得(按住对比时让位)
+                                            censorImg:
+                                                _censorMode &&
+                                                    !_showOriginal &&
+                                                    _censorStyle ==
+                                                        CensorStyle.mosaic
+                                                ? _censorPreview
+                                                : null,
+                                            censorSolid:
+                                                _censorMode &&
+                                                !_showOriginal &&
+                                                _censorStyle ==
+                                                    CensorStyle.solid,
+                                            censorColor: Color(_censorColor),
                                           ),
                                         ),
                                       ),
@@ -1121,11 +1471,10 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
           AnimatedAlign(
             duration: Motion.medium,
             curve: Motion.emphasized,
-            alignment: _expandMode
-                ? Alignment.centerRight
-                : Alignment.centerLeft,
+            // 三档:-1/0/1 三个落点(两档时代那个 centerLeft/Right 的推广)
+            alignment: Alignment(_mode.index - 1.0, 0),
             child: FractionallySizedBox(
-              widthFactor: .5,
+              widthFactor: 1 / 3,
               heightFactor: 1,
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -1141,14 +1490,20 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
               _SegTab(
                 icon: Icons.brush,
                 label: '涂抹',
-                active: !_expandMode,
-                onTap: () => _tapSeg(false),
+                active: _mode == _Mode.paint,
+                onTap: () => _tapSeg(_Mode.paint),
               ),
               _SegTab(
                 icon: Icons.open_in_full,
                 label: '扩图',
                 active: _expandMode,
-                onTap: () => _tapSeg(true),
+                onTap: () => _tapSeg(_Mode.expand),
+              ),
+              _SegTab(
+                icon: Icons.blur_on,
+                label: '打码',
+                active: _censorMode,
+                onTap: () => _tapSeg(_Mode.censor),
               ),
             ],
           ),
@@ -1157,10 +1512,10 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
     );
   }
 
-  void _tapSeg(bool expand) {
-    if (_expandMode == expand) return;
+  void _tapSeg(_Mode m) {
+    if (_mode == m) return;
     Haptics.selection();
-    _setExpandMode(expand);
+    _setMode(m);
   }
 
   Widget _buildBottomPanel() {
@@ -1191,12 +1546,23 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                   active: _tool == _Tool.eraser,
                   onTap: () => _tapTool(_Tool.eraser),
                 ),
-                _ToolBtn(
-                  icon: Icons.crop,
-                  label: '局部',
-                  active: _cropMode,
-                  onTap: _toggleCrop,
-                ),
+                // 局部框是「发送范围」,打码不发送 —— 那一格换成样式切换。
+                // (自动识别不在这排,它挂在 CTA 上,见 _buildCensorCta)
+                if (_censorMode)
+                  _ToolBtn(
+                    icon: _censorStyle == CensorStyle.mosaic
+                        ? Icons.blur_on
+                        : Icons.square_rounded,
+                    label: _censorStyle.label,
+                    onTap: _toggleCensorStyle,
+                  )
+                else
+                  _ToolBtn(
+                    icon: Icons.crop,
+                    label: '局部',
+                    active: _cropMode,
+                    onTap: _toggleCrop,
+                  ),
                 _ToolBtn(
                   icon: Icons.undo,
                   label: '撤销',
@@ -1227,20 +1593,49 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                   ),
                 ),
                 const SizedBox(width: 8),
-                _ParamChip(
-                  icon: Icons.tune,
-                  label: '强度',
-                  value: _strength.toStringAsFixed(2),
-                  active: _slider == _SliderTarget.strength,
-                  onTap: () => setState(
-                    () => _slider = _slider == _SliderTarget.strength
-                        ? null
-                        : _SliderTarget.strength,
+                // 打码:强度换成块大小(纯色模式与块无关,整条隐掉)
+                if (!_censorMode)
+                  _ParamChip(
+                    icon: Icons.tune,
+                    label: '强度',
+                    value: _strength.toStringAsFixed(2),
+                    active: _slider == _SliderTarget.strength,
+                    onTap: () => setState(
+                      () => _slider = _slider == _SliderTarget.strength
+                          ? null
+                          : _SliderTarget.strength,
+                    ),
+                  )
+                else if (_censorStyle == CensorStyle.mosaic)
+                  _ParamChip(
+                    icon: Icons.grid_4x4,
+                    label: '块',
+                    value: '${_censorBlock * 8}',
+                    active: _slider == _SliderTarget.block,
+                    onTap: () => setState(
+                      () => _slider = _slider == _SliderTarget.block
+                          ? null
+                          : _SliderTarget.block,
+                    ),
+                  )
+                else
+                  // 纯色没有块大小可调,那一格改放填充色
+                  _ParamChip(
+                    icon: Icons.palette_outlined,
+                    swatch: Color(_censorColor),
+                    label: '颜色',
+                    value: censorColorLabel(_censorColor),
+                    active: false,
+                    onTap: _pickCensorColor,
                   ),
-                ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: SizedBox(height: 46, child: _buildCtaArea('保存遮罩')),
+                  child: SizedBox(
+                    height: 46,
+                    child: _censorMode
+                        ? _buildCensorCta()
+                        : _buildCtaArea('保存遮罩', onPressed: _fire),
+                  ),
                 ),
               ],
             ),
@@ -1322,21 +1717,48 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
   ///
   /// 这里不再有进度条与点数:生成不在本编辑器发生了 —— 进度在图库画布上,
   /// 点数在创作页那颗主生成按钮上,两处各报一次只会互相打架。
-  Widget _buildCtaArea(String label, {bool disabled = false}) {
+  /// 打码档的 CTA:**一颗按钮两态**。
+  ///
+  /// 遮罩空 → 「自动识别」;涂了(或识别出结果)→ 「保存」。
+  /// 空遮罩本来就不能保存(点了只会弹「先涂抹要打码的区域」),那一格与其
+  /// 摆个按不动的保存,不如摆真正该做的下一步。识别→修补→保存是一条线,
+  /// 一颗按钮跟着走完,不必在工具栏另占一格、也不必拆成两半挤在一起。
+  ///
+  /// 想重跑识别就清空遮罩,按钮自己会变回「自动识别」。
+  Widget _buildCensorCta() {
+    final empty = _grid?.isEmpty ?? true;
+    return _buildCtaArea(
+      empty ? '自动识别' : '保存',
+      icon: empty ? Icons.auto_fix_high : Icons.check_rounded,
+      onPressed: empty ? _autoDetect : _fire,
+      busy: empty ? _detecting : _firing,
+      busyLabel: empty ? '识别中…' : '保存中…',
+    );
+  }
+
+  Widget _buildCtaArea(
+    String label, {
+    bool disabled = false,
+    IconData icon = Icons.check_rounded,
+    VoidCallback? onPressed,
+    bool? busy,
+    String busyLabel = '保存中…',
+  }) {
     final scheme = context.scheme;
+    final loading = busy ?? _firing;
     return FilledButton(
       style: FilledButton.styleFrom(
         padding: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(23)),
       ),
-      onPressed: _firing || disabled ? null : _fire,
+      onPressed: loading || disabled ? null : (onPressed ?? _fire),
       child: FittedBox(
         fit: BoxFit.scaleDown,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (_firing)
+            if (loading)
               SizedBox(
                 width: 16,
                 height: 16,
@@ -1346,10 +1768,10 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
                 ),
               )
             else
-              const Icon(Icons.check_rounded, size: 19),
+              Icon(icon, size: 19),
             const SizedBox(width: 7),
             Text(
-              _firing ? '保存中…' : label,
+              loading ? busyLabel : label,
               style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
             ),
           ],
@@ -1389,7 +1811,18 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
 
   Widget _buildSliderRow() {
     final scheme = context.scheme;
-    final isBrush = _slider == _SliderTarget.brush;
+    final t = _slider ?? _SliderTarget.brush;
+    final title = switch (t) {
+      _SliderTarget.brush => '笔刷大小',
+      _SliderTarget.strength => '重绘强度',
+      _SliderTarget.block => '马赛克块',
+    };
+    // 块以像素示人(格数是实现细节),读数与滑杆都按 px 走
+    final valueText = switch (t) {
+      _SliderTarget.brush => '${_brush.round()}',
+      _SliderTarget.strength => _strength.toStringAsFixed(2),
+      _SliderTarget.block => '${_censorBlock * 8}',
+    };
     return Container(
       height: 48,
       padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -1408,7 +1841,7 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
       child: Row(
         children: [
           Text(
-            isBrush ? '笔刷大小' : '重绘强度',
+            title,
             style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
           ),
           Expanded(
@@ -1416,45 +1849,72 @@ class _InpaintOverlayState extends ConsumerState<InpaintOverlay>
               data: compactSliderTheme,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: isBrush
-                    ? Slider(
-                        value: _brush,
-                        min: 5, // 对齐 web 桌面端(5–200)
-                        max: 200,
-                        onChanged: (v) => setState(() => _brush = v),
-                      )
-                    : Slider(
-                        value: _strength,
-                        min: 0.1,
-                        max: 1.0,
-                        // 不传 divisions:离散 Slider 会用 75ms 曲线把滑块吸到
-                        // 刻度,拖起来黏手。步长(0.01)就地量化。
-                        onChanged: (v) =>
-                            setState(() => _strength = (v * 100).round() / 100),
-                      ),
+                child: switch (t) {
+                  _SliderTarget.brush => Slider(
+                    value: _brush,
+                    min: 5, // 对齐 web 桌面端(5–200)
+                    max: 200,
+                    onChanged: (v) => setState(() => _brush = v),
+                  ),
+                  _SliderTarget.strength => Slider(
+                    value: _strength,
+                    min: 0.1,
+                    max: 1.0,
+                    // 不传 divisions:离散 Slider 会用 75ms 曲线把滑块吸到
+                    // 刻度,拖起来黏手。步长(0.01)就地量化。
+                    onChanged: (v) =>
+                        setState(() => _strength = (v * 100).round() / 100),
+                  ),
+                  // 块大小档位本来就是整数格,这里的 divisions 是刻度不是吸附
+                  // 补丁 —— 和强度那条的取舍不冲突。
+                  _SliderTarget.block => Slider(
+                    value: _censorBlock.toDouble(),
+                    min: kCensorBlockMin.toDouble(),
+                    max: kCensorBlockMax.toDouble(),
+                    divisions: kCensorBlockMax - kCensorBlockMin,
+                    onChanged: (v) => _setCensorBlock(v.round()),
+                  ),
+                },
               ),
             ),
           ),
           ParamValueBox(
-            text: isBrush ? '${_brush.round()}' : _strength.toStringAsFixed(2),
+            text: valueText,
             dense: true,
             onTap: () async {
               final v = await showParamInput(
                 context,
-                title: isBrush ? '笔刷大小' : '重绘强度',
-                value: isBrush ? _brush : _strength,
-                min: isBrush ? 5 : 0.1,
-                max: isBrush ? 200 : 1,
-                divisions: isBrush ? 195 : 90,
+                title: title,
+                value: switch (t) {
+                  _SliderTarget.brush => _brush,
+                  _SliderTarget.strength => _strength,
+                  _SliderTarget.block => _censorBlock * 8.0,
+                },
+                min: switch (t) {
+                  _SliderTarget.brush => 5,
+                  _SliderTarget.strength => 0.1,
+                  _SliderTarget.block => kCensorBlockMin * 8.0,
+                },
+                max: switch (t) {
+                  _SliderTarget.brush => 200,
+                  _SliderTarget.strength => 1,
+                  _SliderTarget.block => kCensorBlockMax * 8.0,
+                },
+                divisions: switch (t) {
+                  _SliderTarget.brush => 195,
+                  _SliderTarget.strength => 90,
+                  _SliderTarget.block => kCensorBlockMax - kCensorBlockMin,
+                },
               );
               if (v == null || !mounted) return;
-              setState(() {
-                if (isBrush) {
-                  _brush = v;
-                } else {
-                  _strength = v;
-                }
-              });
+              switch (t) {
+                case _SliderTarget.brush:
+                  setState(() => _brush = v);
+                case _SliderTarget.strength:
+                  setState(() => _strength = v);
+                case _SliderTarget.block:
+                  _setCensorBlock((v / 8).round());
+              }
             },
           ),
         ],
@@ -1490,6 +1950,9 @@ class _CanvasPainter extends CustomPainter {
     this.preview,
     this.previewDst,
     this.previewClip,
+    this.censorImg,
+    this.censorSolid = false,
+    this.censorColor = const Color(0xFF000000),
   });
 
   final ui.Image image;
@@ -1522,6 +1985,16 @@ class _CanvasPainter extends CustomPainter {
   final ui.Image? preview;
   final ui.Rect? previewDst;
   final List<ui.Rect>? previewClip;
+
+  /// 打码模式的整图马赛克底片:遮罩格从它上面按同坐标取样,画出来的
+  /// 就是出图结果本身(同一套 8px 网格)。非打码模式恒为 null。
+  final ui.Image? censorImg;
+
+  /// 打码=纯色:遮罩直接盖 [censorColor],预览即成品,不需要底片。
+  final bool censorSolid;
+
+  /// 纯色档的填充色(仅 [censorSolid] 为真时有意义)。
+  final Color censorColor;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1574,10 +2047,25 @@ class _CanvasPainter extends CustomPainter {
           ..strokeWidth = 1.6 / scale,
       );
     } else if (rects.isNotEmpty) {
-      // 遮罩(紫,50%+)
-      final p = Paint()..color = _maskFill;
-      for (final r in rects) {
-        canvas.drawRect(r, p);
+      if (censorSolid) {
+        // 纯色打码:预览就是成品
+        final p = Paint()..color = censorColor;
+        for (final r in rects) {
+          canvas.drawRect(r, p);
+        }
+      } else if (censorImg != null) {
+        // 马赛克打码:从整图底片同坐标取样。filterQuality=none —— 块必须是
+        // 硬边方块,插值一平滑就成了模糊,那是另一回事(而且可反推)。
+        final p = Paint()..filterQuality = FilterQuality.none;
+        for (final r in rects) {
+          canvas.drawImageRect(censorImg!, r, r, p);
+        }
+      } else {
+        // 遮罩(紫,50%+)
+        final p = Paint()..color = _maskFill;
+        for (final r in rects) {
+          canvas.drawRect(r, p);
+        }
       }
     }
 
@@ -1604,8 +2092,7 @@ class _CanvasPainter extends CustomPainter {
         dim,
       );
 
-      // 框身:一圈虚线,不画角柄也不画三分线 —— 框已经全自动跟着遮罩走,
-      // 画上手柄等于邀请用户去拖一个拖不动的东西。
+      // 框身:一圈虚线,不画三分线。
       final dashed = _dashPath(Path()..addRect(rect), 7 / scale, 5 / scale);
       canvas.drawPath(
         dashed,
@@ -1622,14 +2109,29 @@ class _CanvasPainter extends CustomPainter {
           ..strokeWidth = 1.8 / scale,
       );
 
-      // 四条边的中点各一根短杠:告诉用户这四条边能拉。
-      // 不画角柄 —— 只支持单边拉伸,画了角就是许了做不到的事。
+      // 拉杆:四条边中点各一根短杠(单边拉),四个角各一个 L 形角柄
+      // (两条边一起拉)。
       final barLen = 22 / scale;
+      final arm = 16 / scale;
       final bar = Paint()
         ..color = accent
         ..style = PaintingStyle.stroke
         ..strokeWidth = 4 / scale
-        ..strokeCap = StrokeCap.round;
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+      final corners = Path();
+      for (final (x, y, sx, sy) in [
+        (rect.left, rect.top, 1.0, 1.0),
+        (rect.right, rect.top, -1.0, 1.0),
+        (rect.left, rect.bottom, 1.0, -1.0),
+        (rect.right, rect.bottom, -1.0, -1.0),
+      ]) {
+        corners
+          ..moveTo(x + sx * arm, y)
+          ..lineTo(x, y)
+          ..lineTo(x, y + sy * arm);
+      }
+      canvas.drawPath(corners, bar);
       final cx = rect.center.dx, cy = rect.center.dy;
       canvas.drawLine(
         Offset(cx - barLen / 2, rect.top),
@@ -1884,7 +2386,10 @@ class _CanvasPainter extends CustomPainter {
       old.erasing != erasing ||
       old.accent != accent ||
       old.preview != preview ||
-      old.previewDst != previewDst;
+      old.previewDst != previewDst ||
+      old.censorImg != censorImg ||
+      old.censorSolid != censorSolid ||
+      old.censorColor != censorColor;
 }
 
 /// 棋盘格填充(隔格绘制),cell 为图空间尺寸。
@@ -2065,7 +2570,11 @@ class _ParamChip extends StatelessWidget {
     required this.value,
     required this.active,
     required this.onTap,
+    this.swatch,
   });
+
+  /// 非空时用实心色块替代图标(颜色本身就是读数,画个调色板图标反而更绕)。
+  final Color? swatch;
 
   final IconData icon;
   final String label;
@@ -2099,7 +2608,21 @@ class _ParamChip extends StatelessWidget {
           ),
           child: Row(
             children: [
-              Icon(icon, size: 15, color: scheme.onSurfaceVariant),
+              if (swatch case final c?)
+                Container(
+                  width: 15,
+                  height: 15,
+                  decoration: BoxDecoration(
+                    color: c,
+                    shape: BoxShape.circle,
+                    // 白色块压在浅底上会消失,描一圈边兜底
+                    border: Border.all(
+                      color: scheme.onSurfaceVariant.withValues(alpha: .45),
+                    ),
+                  ),
+                )
+              else
+                Icon(icon, size: 15, color: scheme.onSurfaceVariant),
               const SizedBox(width: 6),
               Text(
                 '$label $value',

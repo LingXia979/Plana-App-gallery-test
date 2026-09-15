@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:animations/animations.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -477,27 +476,17 @@ class InfoNote extends StatelessWidget {
   }
 }
 
-/// M3 shared-axis 全屏路由(编辑器等二级全屏页)
+/// 二级全屏页的路由(编辑器、令牌管理、LoRA 管理这类)。
 ///
-/// 不做成泛型:15 个调用点都不接收返回值,带上 `<T>` 只会让每处推断失败退化成
+/// **走主题的转场**(安卓上是左右滑动,见 `SlideBackPageTransitionsBuilder`)。原先是
+/// `PageRouteBuilder` + 竖向 shared-axis 转场,自己画的动画绕过了主题,于是同一个 app
+/// 里有的二级页是一种动画、有的是另一种。统一走主题,改转场只改主题一处。
+/// 名字沿用旧的,省得二十来个调用点跟着改。
+///
+/// 不做成泛型:调用点都不接收返回值,带上 `<T>` 只会让每处推断失败退化成
 /// dynamic。将来真有页面要回传结果,再单独加一个泛型版本。
-Route<void> sharedAxisRoute(
-  Widget page, {
-  SharedAxisTransitionType type = SharedAxisTransitionType.vertical,
-}) {
-  return PageRouteBuilder<void>(
-    transitionDuration: Motion.slow,
-    reverseTransitionDuration: Motion.medium,
-    pageBuilder: (_, _, _) => page,
-    transitionsBuilder: (_, animation, secondary, child) =>
-        SharedAxisTransition(
-          animation: animation,
-          secondaryAnimation: secondary,
-          transitionType: type,
-          child: child,
-        ),
-  );
-}
+Route<void> sharedAxisRoute(Widget page) =>
+    MaterialPageRoute<void>(builder: (_) => page);
 
 /// 参考图横条里的可选缩略图 —— Vibe / 角色参考 共用。
 /// 不带删除角标(移除统一走详情区按钮),长按由外层拖动排序接管。
@@ -808,6 +797,21 @@ Future<bool> confirmDialog(
 
 void todoSnack(BuildContext context, String what) =>
     hintSnack(context, '$what · 下一里程碑接入', icon: Icons.upcoming_outlined);
+
+/// 弹层关掉之后**别把焦点还给刚才那个输入框**。
+///
+/// Flutter 的默认行为是路由 pop 之后恢复上一次的焦点,于是「输入框点过 → 打开
+/// 弹层 → 关掉」会把软键盘重新顶出来,而用户只是去看了眼东西、并不打算打字。
+/// 给纯查看类的弹层(选模型、看历史、看提议详情)在关闭后调一下。
+///
+/// 掉两次:pop 当帧一次、下一帧再一次 —— 焦点恢复发生在 pop 的收尾里,
+/// 只掉当帧的话会被随后的恢复盖回去。
+void dropFocusSoon() {
+  FocusManager.instance.primaryFocus?.unfocus();
+  WidgetsBinding.instance.addPostFrameCallback(
+    (_) => FocusManager.instance.primaryFocus?.unfocus(),
+  );
+}
 
 // ---- 顶部悬浮提示(全 app 统一;替代底部 SnackBar) ----
 

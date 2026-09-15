@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../ui/gallery_picker_page.dart';
+import 'harmony_compat.dart';
 
 /// 选中的图片:文件名 + 原始字节。
 class PickedImage {
@@ -20,7 +21,8 @@ class PickedImage {
 /// 选单张图片,取消返回 null。
 ///
 /// Android:应用内图库选择器(直读媒体库,全部相册可达;系统照片选择器
-/// 只放行固定分类且不看 app 权限,故不用),右上角可改走系统选择器兜底。
+/// 只放行固定分类且不看 app 权限,故不用),右上角可改走系统选择器兜底;
+/// 卓易通这类容器里例外,直接走系统选择器,见 [_inAppGallery]。
 /// 桌面端:原生文件对话框。
 Future<PickedImage?> pickImageFile(BuildContext context) async {
   final list = await _pick(context, multiple: false);
@@ -56,7 +58,8 @@ class PickedSources {
 /// 文件那支不预读字节:整包 vibe 可能上百 MB(图是 base64),`withData` 会把
 /// 整批堆进内存;交调用方按 `file_read.dart` 流式读。
 Future<PickedSources> pickImagesOrFiles(BuildContext context) async {
-  if (Platform.isAndroid) {
+  if (await _inAppGallery()) {
+    if (!context.mounted) return const PickedSources.none();
     final out = await _gallery(context, multiple: true);
     if (out == null) return const PickedSources.none();
     if (!out.useFileBrowser) {
@@ -75,7 +78,8 @@ Future<List<PickedImage>> _pick(
   BuildContext context, {
   required bool multiple,
 }) async {
-  if (Platform.isAndroid) {
+  if (await _inAppGallery()) {
+    if (!context.mounted) return const [];
     final out = await _gallery(context, multiple: multiple);
     if (out == null) return const [];
     if (!out.useFileBrowser) return _readAssets(out);
@@ -96,6 +100,12 @@ Future<List<PickedImage>> _pick(
       if (f.bytes case final b? when b.isNotEmpty) PickedImage(f.name, b),
   ];
 }
+
+/// 先进应用内图库吗:Android 上是;鸿蒙的安卓兼容容器(卓易通 / 出境易)里不进,
+/// 直接落到图库右上角那个入口(系统选择器 / 文件浏览器)。容器里的媒体库桥接在
+/// 鸿蒙侧,应用内图库逐张查库、查文件都要跨过去一趟,进页比普通机慢得多。
+Future<bool> _inAppGallery() async =>
+    Platform.isAndroid && !await isHarmonyCompatContainer;
 
 /// 应用内图库选择器,返回 null = 用户取消。
 Future<GalleryPickOutcome?> _gallery(

@@ -41,10 +41,14 @@ class AnlasNotifier extends AsyncNotifier<NaiSubscription?> {
         return null;
       }
     }
-    final token = await ref.watch(tokenProvider.future);
-    if (token == null || token.isEmpty) return null;
+    final key = await ref.watch(primaryNaiKeyProvider.future);
+    if (key == null || key.token.isEmpty) return null;
     try {
-      return await ref.read(naiClientProvider).subscription(token);
+      // watch:换了主账号、或它打的机器变了,客户端跟着换,这里重查一次
+      // (读到的是另一台机器上的账户读数,留着旧数就是错数)。
+      return await ref
+          .watch(naiClientProvider(key.endpoint))
+          .subscription(key.token);
     } catch (_) {
       return null;
     }
@@ -70,9 +74,11 @@ class AnlasNotifier extends AsyncNotifier<NaiSubscription?> {
           usage: res.usage,
         );
       } else {
-        final token = await ref.read(tokenProvider.future);
-        if (token == null || token.isEmpty) return;
-        next = await ref.read(naiClientProvider).subscription(token);
+        final key = await ref.read(primaryNaiKeyProvider.future);
+        if (key == null || key.token.isEmpty) return;
+        next = await ref
+            .read(naiClientProvider(key.endpoint))
+            .subscription(key.token);
       }
       state = AsyncData(next);
     } catch (_) {} // 拉失败保留旧值(旧行为会把显示清掉,更糟)

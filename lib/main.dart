@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,6 +7,7 @@ import 'core/store/app_stores.dart';
 import 'core/store/gen_settings.dart';
 import 'core/theme/app_theme.dart';
 import 'core/theme/theme_settings.dart';
+import 'core/ui/input_focus_guard.dart';
 import 'features/onboarding/welcome_page.dart';
 import 'features/shell/app_shell.dart';
 import 'core/util/haptics.dart';
@@ -16,14 +15,16 @@ import 'features/editor/data/local_tag_db.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // 离线词库索引与存档并行读:它不压缩存、引擎直接 mmap,几毫秒就好。装好后
+  // 注音 / 热度反查从第一帧起就是同步可用的,不再有开机「灌注」这一步。
+  final tagDb = LocalTagDb();
+  final tagDbReady = tagDb.install();
   // 启动装载持久化状态(工作台存档 + 图库索引 + 设置;失败按首启空档降级)。
   // 外观预读(首帧不闪色)现在直接取内存态 —— 设置已随 AppStores 一次读全,
   // 不再需要第二笔 I/O,也不必再解一次 Keystore。
   final stores = await AppStores.open();
+  await tagDbReady;
   final themeInit = loadThemeSettings(stores.prefs);
-  // 自己 new 再注进去,是为了**开机就能开灌**(见下面 warmTagMeta):
-  // 走 provider 的话第一个读它的人才创建,那就还是"谁先用到谁背这一下"。
-  final tagDb = LocalTagDb();
   runApp(
     ProviderScope(
       overrides: [
@@ -44,24 +45,11 @@ Future<void> main() async {
     },
   );
   stores.postBootMaintenance(); // 选图器缓存清扫 + blob GC(延迟后台跑)
-  // 离线词库开机就灌:编辑器补全、法典/灵感页芯片的注音都要它,基本每次开
-  // app 都会碰到,与其等第一个用到的人背这一下,不如开机顺手灌完。
-  //
-  // 早先是"谁先用到谁触发",而那几个触发点全带动画:第一次进编辑器、第一次
-  // 翻法典的牌 —— 翻牌那一下实测多花 130 多毫秒(读 4.9MB asset 与解析虽在别
-  // 的 isolate,最后灌 9 万条反查缓存那一遍是主线程的),正好砸在卡片转起来的
-  // 时候。原来的触发点都留着不动:[LocalTagDb.warmTagMeta] 幂等,灌过即返回。
-  //
-  // 等首帧过去再动手 —— 主线程那一遍不跟开屏抢。
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    unawaited(
-      Future<void>.delayed(
-        const Duration(milliseconds: 600),
-        tagDb.warmTagMeta,
-      ),
-    );
-  });
 }
+
+/// 弹层关掉后不把键盘顶出来(见 [InputFocusGuard])。放在外面:换主题时 MaterialApp
+/// 会重建,观察者得是同一个。
+final _inputFocusGuard = InputFocusGuard();
 
 class PlanaApp extends ConsumerWidget {
   const PlanaApp({super.key});
@@ -77,6 +65,7 @@ class PlanaApp extends ConsumerWidget {
       theme: AppTheme.light(ts.seed.color),
       darkTheme: AppTheme.dark(ts.seed.color),
       themeMode: ts.mode,
+      navigatorObservers: [_inputFocusGuard],
       home: const _AuthGate(),
     );
   }

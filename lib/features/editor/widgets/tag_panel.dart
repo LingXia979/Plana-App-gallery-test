@@ -101,6 +101,10 @@ const double _kTailW = 34; // ⌫ / 👁 / 🗑 / ⇄
 /// 和「退化成横向滚动」的分界。
 const double _kGap = 5;
 
+/// 完整版面板(词条栏 / 批量面板)的控件高度:头部圆钮、权重行的括号键与
+/// 加减钮、底下那排操作键全用这一个数,面板的纵向节奏只由它和几道缝决定。
+const double _kPanelBtnH = 38;
+
 class _TagPanelState extends State<TagPanel> {
   bool _relatedOpen = false; // 关联标签是否展开
   bool _renaming = false; // 标题处于行内改名态
@@ -157,13 +161,13 @@ class _TagPanelState extends State<TagPanel> {
     final tok = widget.tok;
     final on = !tok.disabled;
 
-    // 读数/名字色以**自身**权重为准(组权重单独一行展示,web 同款语义):
-    // +/− 与清除操作的对象都是自身权重,读数一致才不跳变。
+    // 读数/名字色以 +/− 与清除改的那份权重为准([Tok.tagMult]):自身写的,
+    // 或包着它的数值组 —— 读数与操作对象一致才不跳变。括号组单独一行展示。
     final Color wc = tok.disabled
         ? scheme.onSurfaceVariant
-        : tok.ownMult > 1.0001
+        : tok.tagMult > 1.0001
         ? pal.weightUp
-        : tok.ownMult < 0.9999
+        : tok.tagMult < 0.9999
         ? pal.weightDown
         : scheme.onSurface;
 
@@ -171,9 +175,10 @@ class _TagPanelState extends State<TagPanel> {
 
     if (widget.compact) {
       return Material(
-        color: scheme.surfaceContainer,
+        color: context.editorDock,
+        shape: Border(top: BorderSide(color: context.editorDockLine)),
         child: Padding(
-          // 上下各 10:按钮 38 高,一行落在 58 —— 完整版是 175
+          // 上下各 10:按钮 38 高,一行落在 58 —— 完整版约 155
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
           child: _compactRow(context, wc),
         ),
@@ -181,9 +186,10 @@ class _TagPanelState extends State<TagPanel> {
     }
 
     return Material(
-      color: scheme.surfaceContainer,
+      color: context.editorDock,
+      shape: Border(top: BorderSide(color: context.editorDockLine)),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 10, 12, 12),
+        padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -202,7 +208,7 @@ class _TagPanelState extends State<TagPanel> {
             ),
             // 跨词条权重组信息:自身读数之外单独陈述组权重与合计,
             // 「选中整组」一键进批量面板调组权重。
-            if ((tok.groupMult - 1).abs() > 0.0001)
+            if (tok.inGroup)
               Padding(
                 padding: const EdgeInsets.only(top: 5),
                 child: Row(
@@ -260,7 +266,7 @@ class _TagPanelState extends State<TagPanel> {
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 11,
-                        vertical: 9,
+                        vertical: 8,
                       ),
                       child: Row(
                         children: [
@@ -322,12 +328,14 @@ class _TagPanelState extends State<TagPanel> {
                 RepeatBtn(
                   icon: Icons.remove,
                   enabled: on,
-                  step: () => widget.onSetMult(tok.numMult - widget.weightStep),
+                  size: _kPanelBtnH,
+                  step: () =>
+                      widget.onSetMult(tok.numWeight - widget.weightStep),
                 ),
                 SizedBox(
                   width: 60,
                   child: Text(
-                    '×${fmtMult(tok.ownMult)}',
+                    '×${fmtMult(tok.tagMult)}',
                     textAlign: TextAlign.center,
                     // 读数只报数,不跟着权重变红蓝 —— 高低看名字色与正文色带
                     style: mono(
@@ -342,11 +350,13 @@ class _TagPanelState extends State<TagPanel> {
                 RepeatBtn(
                   icon: Icons.add,
                   enabled: on,
-                  step: () => widget.onSetMult(tok.numMult + widget.weightStep),
+                  size: _kPanelBtnH,
+                  step: () =>
+                      widget.onSetMult(tok.numWeight + widget.weightStep),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             // 操作:清除权重 · 关联(点开展开)· 禁用 · 删除
             Row(
               children: [
@@ -357,7 +367,7 @@ class _TagPanelState extends State<TagPanel> {
                     enabled:
                         on &&
                         (tok.braceLevel != 0 ||
-                            (tok.numMult - 1.0).abs() >= 0.005),
+                            (tok.numWeight - 1.0).abs() >= 0.005),
                     onTap: widget.onClear,
                   ),
                 ),
@@ -422,9 +432,9 @@ class _TagPanelState extends State<TagPanel> {
               alignment: Alignment.topCenter,
               child: (_relatedOpen && hasRelated)
                   ? Padding(
-                      padding: const EdgeInsets.only(top: 12),
+                      padding: const EdgeInsets.only(top: 10),
                       child: SizedBox(
-                        height: 54,
+                        height: 50,
                         width: double.infinity,
                         child: ListView.separated(
                           scrollDirection: Axis.horizontal,
@@ -471,9 +481,9 @@ class _TagPanelState extends State<TagPanel> {
     final tok = widget.tok;
     final on = !tok.disabled;
     final canClear =
-        on && (tok.braceLevel != 0 || (tok.numMult - 1.0).abs() >= 0.005);
-    final inGroup = (tok.groupMult - 1).abs() > 0.0001;
-    final weighted = (tok.ownMult - 1).abs() > 0.005;
+        on && (tok.braceLevel != 0 || (tok.numWeight - 1.0).abs() >= 0.005);
+    final inGroup = tok.inGroup;
+    final weighted = (tok.tagMult - 1).abs() > 0.005;
 
     // 固定宽的那几段。**改控件尺寸要同步改这里** —— 这几个数是「滚不滚」的
     // 依据,对不上就会在该滚的时候不滚(溢出)。
@@ -493,7 +503,7 @@ class _TagPanelState extends State<TagPanel> {
     Widget readout() => SizedBox(
       width: _kReadW,
       // 在权重组里时长按报组信息:组权重与合计在这儿没地方常驻,而不说的话
-      // 读数(自身 ×1)会和正文里明显被加权的样子对不上,那是这一栏在骗人。
+      // 按 +/− 时同组的词跟着变、括号组那层读数里又没算,这一栏就在骗人。
       // 旁边那枚图层图标是「这里还有话」的记号。
       child: GestureDetector(
         onLongPress: inGroup
@@ -522,7 +532,7 @@ class _TagPanelState extends State<TagPanel> {
                 const SizedBox(width: 2),
               ],
               Text(
-                '×${fmtMult(tok.ownMult)}',
+                '×${fmtMult(tok.tagMult)}',
                 // 12 不是随手挑的:这套等宽字的步进宽度**等于字号**,
                 // ×1.2 四个字符正好 48,卡在 50 的槽里不用缩
                 style: mono(
@@ -570,7 +580,7 @@ class _TagPanelState extends State<TagPanel> {
         icon: Icons.remove,
         enabled: on,
         size: _kStepW,
-        step: () => widget.onSetMult(tok.numMult - widget.weightStep),
+        step: () => widget.onSetMult(tok.numWeight - widget.weightStep),
       ),
       const SizedBox(width: _kGap),
       readout(),
@@ -579,7 +589,7 @@ class _TagPanelState extends State<TagPanel> {
         icon: Icons.add,
         enabled: on,
         size: _kStepW,
-        step: () => widget.onSetMult(tok.numMult + widget.weightStep),
+        step: () => widget.onSetMult(tok.numWeight + widget.weightStep),
       ),
       const SizedBox(width: _kGap),
       _weightBtn(
@@ -761,6 +771,7 @@ class _Header extends StatelessWidget {
                         style: context.texts.titleMedium!.copyWith(
                           color: wc,
                           fontWeight: FontWeight.w700,
+                          height: 1.35,
                           decoration: tok.disabled
                               ? TextDecoration.lineThrough
                               : null,
@@ -792,14 +803,15 @@ class _Header extends StatelessWidget {
                       ),
                   ],
                 ),
+                // 译文只给一行:长译文折成两行会把整张面板顶高一截
                 if (tok.trans != null && tok.trans!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 1),
-                    child: Text(
-                      tok.trans!,
-                      style: context.texts.bodyMedium!.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
+                  Text(
+                    tok.trans!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.texts.bodyMedium!.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      height: 1.3,
                     ),
                   ),
               ],
@@ -849,7 +861,7 @@ class _Header extends StatelessWidget {
               isDense: true,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 10,
-                vertical: 8,
+                vertical: 7,
               ),
               filled: true,
               fillColor: scheme.surfaceContainerHighest,
@@ -899,7 +911,7 @@ Widget _weightBtn(
   required bool enabled,
   required VoidCallback onTap,
   double width = 46,
-  double height = 38,
+  double height = _kPanelBtnH,
   // 「[ ]」是三个等宽字符,而这套字的步进宽度**等于字号** —— 14 号就是 42,
   // 比 38 宽的按钮还宽,一直被裁着画。默认留给完整版(46 宽,放得下)。
   double fontSize = 14,
@@ -960,8 +972,8 @@ Widget _action(
     clipBehavior: Clip.antiAlias,
     child: InkWell(
       onTap: enabled ? onTap : null,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 11),
+      child: SizedBox(
+        height: _kPanelBtnH,
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -1005,8 +1017,8 @@ Widget _circleIcon(
     child: InkWell(
       onTap: onTap,
       child: SizedBox(
-        width: 40,
-        height: 40,
+        width: _kPanelBtnH,
+        height: _kPanelBtnH,
         child: Icon(icon, size: 18, color: scheme.onSurfaceVariant),
       ),
     ),
@@ -1136,9 +1148,10 @@ class BatchPanel extends StatelessWidget {
     final off = anyEnabled || !canDisable;
 
     return Material(
-      color: scheme.surfaceContainer,
+      color: context.editorDock,
+      shape: Border(top: BorderSide(color: context.editorDockLine)),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 10, 12, 12),
+        padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1289,6 +1302,7 @@ class BatchPanel extends StatelessWidget {
                 RepeatBtn(
                   icon: Icons.remove,
                   enabled: weight,
+                  size: _kPanelBtnH,
                   step: () => onStepMult(false),
                 ),
                 SizedBox(
@@ -1306,11 +1320,12 @@ class BatchPanel extends StatelessWidget {
                 RepeatBtn(
                   icon: Icons.add,
                   enabled: weight,
+                  size: _kPanelBtnH,
                   step: () => onStepMult(true),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             Row(
               children: [
                 Expanded(

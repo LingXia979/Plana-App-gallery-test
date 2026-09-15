@@ -5,10 +5,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/auth_mode.dart';
 import '../../core/auth/bot_session_store.dart';
+import '../../core/auth/nai_keys.dart';
 import '../../core/auth/token_probe.dart';
 import '../../core/auth/token_store.dart';
 import '../../core/live_progress/live_progress.dart';
 import '../../core/net/nai_client.dart';
+import '../../core/net/nai_endpoint.dart';
 import '../../core/store/gen_settings.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/theme_settings.dart';
@@ -535,8 +537,17 @@ class _AccessStep extends ConsumerStatefulWidget {
 class _AccessStepState extends ConsumerState<_AccessStep>
     with SingleTickerProviderStateMixin {
   final _tokenCtrl = TextEditingController();
+  final _urlCtrl = TextEditingController();
   bool _obscure = true;
   bool _saving = false;
+
+  /// 直连卡里选的是第三方接口(地址跟这把令牌一起存,见 [NaiKey.endpoint])。
+  /// 它不是第三种**接入方式** —— 接入方式仍是直连,只是不打官方那台机器,
+  /// 所以做成卡内的分段而不是第三张卡。
+  bool _third = false;
+
+  /// 第三方地址填得不成形时的当场提示(官方那一路没有这一栏)。
+  String? _urlError;
 
   /// 两张卡共用的切换动画:0 = 直连展开,1 = Bot 展开。
   /// 一条补间此消彼长,总高度单调变化,页面居中也不会被顶得一晃。
@@ -554,14 +565,16 @@ class _AccessStepState extends ConsumerState<_AccessStep>
 
   late final Animation<double> _tokenExpand = ReverseAnimation(_botExpand);
 
+  // 引导页贴的是官方令牌(第三方接口在令牌管理页添加),固定查官方。
   late final TokenProbe _probe = TokenProbe(
-    (t) => ref.read(naiClientProvider).subscription(t),
+    (t) => ref.read(naiClientProvider('')).subscription(t),
   );
 
   @override
   void initState() {
     super.initState();
     _tokenCtrl.addListener(_onInput);
+    _urlCtrl.addListener(_onUrl);
     _probe.addListener(_onProbe);
   }
 
@@ -571,7 +584,24 @@ class _AccessStepState extends ConsumerState<_AccessStep>
 
   void _onInput() {
     setState(() {});
-    _probe.input(_tokenCtrl.text);
+    // 第三方不查:`/user/subscription` 是官方的东西,中转站大多没实现,
+    // 查失败会在保存之前就摆一行红字,而那把 key 多半是好的。
+    if (!_third) _probe.input(_tokenCtrl.text);
+  }
+
+  void _onUrl() => setState(() => _urlError = null);
+
+  /// 官方 ↔ 第三方。切过去先把探测结果清掉 —— 那是刚才查官方留下的,
+  /// 挂在第三方那一栏下面就是张冠李戴。
+  void _switchThird(bool third) {
+    if (third == _third) return;
+    setState(() {
+      _third = third;
+      _urlError = null;
+    });
+    _probe.reset();
+    if (!third) _probe.input(_tokenCtrl.text);
+    Haptics.selection();
   }
 
   @override
@@ -583,26 +613,60 @@ class _AccessStepState extends ConsumerState<_AccessStep>
     _tokenCtrl
       ..removeListener(_onInput)
       ..dispose();
+    _urlCtrl
+      ..removeListener(_onUrl)
+      ..dispose();
     super.dispose();
   }
 
-  Future<void> _paste() async {
+  Future<void> _paste(TextEditingController c) async {
     final d = await Clipboard.getData(Clipboard.kTextPlain);
     final t = d?.text?.trim();
     if (t == null || t.isEmpty) return;
-    _tokenCtrl.text = t;
-    _tokenCtrl.selection = TextSelection.collapsed(
-      offset: _tokenCtrl.text.length,
-    );
+    c.text = t;
+    c.selection = TextSelection.collapsed(offset: c.text.length);
   }
+
+  /// 能不能保存:官方只要有令牌,第三方还要有地址。地址的形态留到按下保存时
+  /// 才校验 —— 边打边标红,打到一半全程都是红的。
+  bool get _canSave =>
+      !_saving &&
+      _tokenCtrl.text.trim().isNotEmpty &&
+      (!_third || _urlCtrl.text.trim().isNotEmpty);
+
+  /// 卡内输入框的统一装饰(地址与令牌两栏同一套)。
+  InputDecoration _fieldDec(
+    ColorScheme scheme,
+    String hint, {
+    Widget? suffix,
+  }) => InputDecoration(
+    isDense: true,
+    filled: true,
+    fillColor: scheme.surfaceContainerHigh,
+    hintText: hint,
+    hintStyle: TextStyle(color: scheme.outline),
+    border: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: BorderSide.none,
+    ),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+    suffixIcon: suffix,
+  );
 
   Future<void> _saveToken() async {
     final t = _tokenCtrl.text.trim();
     if (t.isEmpty) return;
+    // 第三方:地址跟这把 key 绑成一把存下。形态不对当场挡下;通不通不在这里探
+    // —— 中转站多半没开 GET,探测失败反而拦住能用的地址。
+    final url = _third ? normalizeNaiBase(_urlCtrl.text) : '';
+    if (_third && (url.isEmpty || !naiBaseLooksValid(url))) {
+      setState(() => _urlError = '请填 http:// 或 https:// 开头的接口地址');
+      return;
+    }
     setState(() => _saving = true);
     // 手贴的这把不带续期凭证,到期需重贴。凭证现在跟着每把 Key 存,所以不必
     // 再作废什么 —— 不存在「续期把令牌换成别的账号」这条老坑了。
-    await ref.read(tokenProvider.notifier).save(t);
+    await ref.read(naiKeysStoreProvider.notifier).add(t, endpoint: url);
     if (!mounted) return;
     setState(() => _saving = false);
     await ref.read(authModeProvider.notifier).set(AuthMode.token);
@@ -611,6 +675,8 @@ class _AccessStepState extends ConsumerState<_AccessStep>
 
   /// 邮箱密码登录:sheet 里已换 JWT 并落盘,这里回填输入框(触发档位
   /// 查询)+ 把接入方式定为直连,与手动保存令牌走完同样的收尾。
+  ///
+  /// 只在官方那一路露出:登录走的是 NAI 官方账号体系,中转站不发这种账号。
   Future<void> _credentialLogin() async {
     final jwt = await showCredentialLoginSheet(context);
     if (jwt == null || !mounted) return;
@@ -656,16 +722,69 @@ class _AccessStepState extends ConsumerState<_AccessStep>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 直连是本机直打 api.novelai.net:网络到不了官网,令牌填对了
-                // 也一样生成不了(那条路该走下一张卡的 Bot)。
+                // 官方 / 第三方是**同一种接入方式**的两台机器,所以做成卡内分段
+                // 而不是第三张卡 —— 第三张卡会让人以为它跟 Bot 那条一样,
+                // 是另一套账号体系。
+                SizedBox(
+                  width: double.infinity,
+                  child: SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(value: false, label: Text('官方')),
+                      ButtonSegment(value: true, label: Text('第三方')),
+                    ],
+                    selected: {_third},
+                    showSelectedIcon: false,
+                    // 卡内地方紧,收掉点按区外扩的那圈留白 —— 不收的话这一条
+                    // 会比下面的输入框还高。
+                    style: SegmentedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      textStyle: context.texts.labelMedium,
+                    ),
+                    onSelectionChanged: (v) => _switchThird(v.first),
+                  ),
+                ),
+                // 直连是本机直打 NovelAI:网络到不了官网,令牌填对了也一样
+                // 生成不了(那条路该走下一张卡的 Bot,或换第三方接口)。
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 9),
+                  padding: const EdgeInsets.fromLTRB(0, 9, 0, 9),
                   child: Text(
-                    '请确保你的网络可以访问 NovelAI 官网',
+                    _third
+                        ? '兼容 NovelAI 接口的中转站或自建反代,地址跟这把 key 一起存'
+                        : '请确保你的网络可以访问 NovelAI 官网',
                     style: context.texts.labelSmall!.copyWith(
                       color: scheme.outline,
                     ),
                   ),
+                ),
+                // 两种表单高矮不同,换分段时补成过渡,不然整张卡会啪地跳一下。
+                AnimatedSize(
+                  duration: Motion.fast,
+                  curve: Motion.standard,
+                  alignment: Alignment.topCenter,
+                  child: _third
+                      ? Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: TextField(
+                            controller: _urlCtrl,
+                            autocorrect: false,
+                            enableSuggestions: false,
+                            keyboardType: TextInputType.url,
+                            textInputAction: TextInputAction.next,
+                            style: mono(context, size: 12),
+                            decoration: _fieldDec(
+                              scheme,
+                              'https://example.com',
+                              suffix: IconButton(
+                                onPressed: () => _paste(_urlCtrl),
+                                icon: const Icon(Icons.content_paste, size: 18),
+                                color: scheme.onSurfaceVariant,
+                                visualDensity: VisualDensity.compact,
+                              ),
+                            ),
+                          ),
+                        )
+                      : const SizedBox.shrink(),
                 ),
                 TextField(
                   controller: _tokenCtrl,
@@ -674,25 +793,14 @@ class _AccessStepState extends ConsumerState<_AccessStep>
                   enableSuggestions: false,
                   keyboardType: TextInputType.visiblePassword,
                   style: mono(context, size: 12),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    filled: true,
-                    fillColor: scheme.surfaceContainerHigh,
-                    hintText: 'pst-… / eyJ…',
-                    hintStyle: TextStyle(color: scheme.outline),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 12,
-                    ),
-                    suffixIcon: Row(
+                  decoration: _fieldDec(
+                    scheme,
+                    _third ? '接口 key' : 'pst-… / eyJ…',
+                    suffix: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
-                          onPressed: _paste,
+                          onPressed: () => _paste(_tokenCtrl),
                           icon: const Icon(Icons.content_paste, size: 18),
                           color: scheme.onSurfaceVariant,
                           visualDensity: VisualDensity.compact,
@@ -713,18 +821,25 @@ class _AccessStepState extends ConsumerState<_AccessStep>
                 const SizedBox(height: 10),
                 Row(
                   children: [
+                    // 第三方不查账户状态,那一格就空着,只在地址填不成形时
+                    // 摆一行红字 —— 借现成的空位说话,不给卡再加一段高度。
                     Expanded(
-                      child: tokenStatusLine(
-                        context,
-                        _probe,
-                        onRetry: () => _probe.run(_tokenCtrl.text),
-                      ),
+                      child: _third
+                          ? Text(
+                              _urlError ?? '',
+                              style: context.texts.labelSmall!.copyWith(
+                                color: scheme.error,
+                              ),
+                            )
+                          : tokenStatusLine(
+                              context,
+                              _probe,
+                              onRetry: () => _probe.run(_tokenCtrl.text),
+                            ),
                     ),
                     const SizedBox(width: 8),
                     FilledButton.tonal(
-                      onPressed: _tokenCtrl.text.trim().isEmpty || _saving
-                          ? null
-                          : _saveToken,
+                      onPressed: _canSave ? _saveToken : null,
                       style: FilledButton.styleFrom(
                         minimumSize: const Size(72, 38),
                         visualDensity: VisualDensity.compact,
@@ -733,18 +848,21 @@ class _AccessStepState extends ConsumerState<_AccessStep>
                     ),
                   ],
                 ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    onPressed: _credentialLogin,
-                    style: TextButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                // 邮箱登录只在官方那一路露出:中转站不发 NAI 账号,
+                // 摆在第三方下面等于给一条走不通的路。
+                if (!_third)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: _credentialLogin,
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                      ),
+                      icon: const Icon(Icons.mail_outline, size: 15),
+                      label: const Text('没有令牌?用邮箱密码登录'),
                     ),
-                    icon: const Icon(Icons.mail_outline, size: 15),
-                    label: const Text('没有令牌?用邮箱密码登录'),
                   ),
-                ),
               ],
             ),
           ),

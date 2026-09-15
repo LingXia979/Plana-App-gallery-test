@@ -10,6 +10,9 @@ import '../../core/net/backend_config.dart';
 import '../../core/store/app_stores.dart';
 import '../../core/store/prefs_store.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/theme/theme_settings.dart';
+import '../assistant/assistant_page.dart';
+import '../assistant/assistant_state.dart';
 import '../gallery/gallery_page.dart';
 import '../generate/generate_page.dart';
 import '../generate/generation_controller.dart';
@@ -20,7 +23,7 @@ import '../update/update_service.dart';
 import '../update/update_sheet.dart' show showUpdateSheet;
 import 'shell_state.dart';
 
-/// 全局骨架:4 tab 底部导航 + PageView 切页。
+/// 全局骨架:5 tab 底部导航(AI 那格可藏)+ PageView 切页。
 ///
 /// **横滑翻 tab 已关掉**(physics 恒为 NeverScrollable),切页只认底部导航点按与
 /// 程序跳转(生成完跳图库、缺 token 跳我的)。PageView 留着只为那段横向推移动画。
@@ -42,6 +45,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   static const _pages = [
     GeneratePage(),
     GalleryPage(),
+    AssistantPage(),
     InspirationPage(),
     ProfilePage(),
   ];
@@ -101,15 +105,45 @@ class _AppShellState extends ConsumerState<AppShell> {
     super.dispose();
   }
 
+  /// 切到创作页的一刻:把「AI 页导入过、还没来看」的角标熄掉。
+  ///
+  /// **不再在这儿弹回执**:导入本身就是用户在结果卡上点的,当场已经弹过一次
+  /// 「已写入创作页」,路过再弹一条是重复。撤销的入口长期留在那张卡上。
+  void _onEnterCreate() => ref.read(assistantProvider.notifier).markSeen();
+
   @override
   Widget build(BuildContext context) {
     final index = ref.watch(shellIndexProvider);
+    // 底栏可以藏掉「AI」那一格(外观设置里)。**页面列表不跟着变**:
+    // PageView 五页照旧,跨页跳转用的还是 kTab* 那几个逻辑下标,
+    // 只在画底栏和读回点击时做一次映射 —— 把下标也跟着挪的话,
+    // 「生成完跳图库」「缺 token 跳我的」这些调用点全得判一遍开关。
+    final showAi = ref.watch(
+      themeSettingsProvider.select((t) => t.showAssistant),
+    );
+    final tabs = [
+      kTabCreate,
+      kTabGallery,
+      if (showAi) kTabAssistant,
+      kTabInspiration,
+      kTabProfile,
+    ];
+    // 正停在 AI 页时被关掉(例如从别处恢复的状态):退回创作页,
+    // 否则 selectedIndex 会拿到 -1。
+    if (!showAi && index == kTabAssistant) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) ref.read(shellIndexProvider.notifier).select(kTabCreate);
+      });
+    }
 
     // 索引变化(导航点按 / 生成后跳图库)→ 滑到对应页。
     ref.listen<int>(shellIndexProvider, (prev, next) {
       if (!_pc.hasClients) return;
-      final current = _pc.page?.round() ?? _pc.initialPage;
-      if (current != next) {
+      // 比精确页码,不比 round 过的:切页动画途中改点别的格,若途经页 round 出来
+      // 恰好是新目标,会被当成「已经到了」,页面却继续滑向原目标、底栏对不上。
+      // 停稳时 page 就是整数(PagePosition 会把浮点误差吸附掉)。
+      final current = _pc.page ?? _pc.initialPage.toDouble();
+      if (current != next.toDouble()) {
         // 切页先收焦点。PageView 是保活的,离开时焦点还留在原页的输入框上
         // (灵感页搜索框最容易中招),之后**在任何一页**切页都会把软键盘重新
         // 顶出来一下。放在动画开始前,不是切完再收 —— 否则过渡里照样闪一下。
@@ -156,33 +190,53 @@ class _AppShellState extends ConsumerState<AppShell> {
           controller: _pc,
           // 只让程序 animateToPage 驱动;用户横滑一律不吃
           physics: const NeverScrollableScrollPhysics(),
-          onPageChanged: (i) => ref.read(shellIndexProvider.notifier).select(i),
+          // **不接 onPageChanged**:页面只会跟着索引走,而 animateToPage 途经的
+          // 每一页都会上报一次。写回索引的话,创作 → 灵感会在半路把索引拨成 AI 页
+          // —— 没做过引导的弹出引导;底栏藏了 AI 的,被上面那段拽回创作页。
           children: _pages,
         ),
       ),
       bottomNavigationBar: NavigationBar(
-        selectedIndex: index,
+        selectedIndex: tabs.indexOf(index).clamp(0, tabs.length - 1),
         // 重绘编辑中也允许点按切页(图库页 keep-alive,回来面板还在);
         // 仅横滑仍锁(防抢涂抹手势)。
-        onDestinationSelected: (i) =>
-            ref.read(shellIndexProvider.notifier).select(i),
-        destinations: const [
+        onDestinationSelected: (i) {
+          final tab = tabs[i];
+          ref.read(shellIndexProvider.notifier).select(tab);
+          if (tab == kTabCreate) _onEnterCreate();
+        },
+        destinations: [
           NavigationDestination(
-            icon: Icon(Icons.draw_outlined),
-            selectedIcon: Icon(Icons.draw),
+            // 用户在 AI 页点过「导入」、但还没切过来看时点亮。
+            // 独立 tab 没有「改动就在眼皮底下」的同屏感,这颗点是全部的补偿 ——
+            // 它只负责说「那边有东西变了」,改了什么去看提示词卡。
+            icon: Badge(
+              isLabelVisible: ref.watch(
+                assistantProvider.select((s) => s.changedUnseen),
+              ),
+              smallSize: 8,
+              child: const Icon(Icons.draw_outlined),
+            ),
+            selectedIcon: const Icon(Icons.draw),
             label: '创作',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.photo_library_outlined),
             selectedIcon: Icon(Icons.photo_library),
             label: '图库',
           ),
-          NavigationDestination(
+          if (showAi)
+            const NavigationDestination(
+              icon: Icon(Icons.auto_awesome_outlined),
+              selectedIcon: Icon(Icons.auto_awesome),
+              label: 'AI',
+            ),
+          const NavigationDestination(
             icon: Icon(Icons.lightbulb_outline),
             selectedIcon: Icon(Icons.lightbulb),
             label: '灵感',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.person_outline),
             selectedIcon: Icon(Icons.person),
             label: '我的',

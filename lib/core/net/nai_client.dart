@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'package:msgpack_dart/msgpack_dart.dart' as msgpack;
 
 import 'gen_abort.dart';
+import 'nai_endpoint.dart';
 
 /// 流式生成的一帧:step 非空=中间预览,isFinal=终图。
 typedef NaiFrame = ({int? step, bool isFinal, Uint8List bytes});
@@ -145,7 +146,16 @@ extension NaiUsageX on NaiUsage {
 
 /// NovelAI 直连客户端(v1:App 用用户自己的 Bearer token 直接打 NAI)。
 /// 复刻后端 `novelai_web_ui/server/app.py` 的原生请求。
-final naiClientProvider = Provider<NaiClient>((ref) => NaiClient());
+///
+/// 按**基址**分实例(family 参数即基址,空串 = 官方 [kNaiOfficialBase])。
+///
+/// 不是单例:基址跟着每把令牌走(见 `NaiKey.endpoint`),官方号和第三方中转的
+/// key 可以同时存着,各打各的机器 —— 没有「当前接口地址」这种全局状态可依赖,
+/// 调用方拿的是哪把 Key 就传哪个地址。换地址等于换 family 键,`watch` 它的
+/// 账户查询会自己重来一遍。
+final naiClientProvider = Provider.family<NaiClient, String>(
+  (ref, base) => NaiClient(base: base),
+);
 
 class NaiException implements Exception {
   NaiException(this.message, {this.status});
@@ -160,12 +170,21 @@ class NaiException implements Exception {
 const kNaiV5UpscaleModel = 'nai-diffusion-5-curated';
 
 class NaiClient {
-  static const _imageHost = 'https://image.novelai.net';
+  /// [base] 为空 = 官方 [kNaiOfficialBase];非空则整条直连线改打它。
+  NaiClient({String base = ''}) : _host = naiBaseOf(base);
+
+  /// `/ai/*` 与 `/user/subscription` 的基址(已带协议、无尾斜杠)。
+  final String _host;
+
+  /// 报错文案里的主机名(自定义地址时不能再张口就说「novelai.net 被拦了」)。
+  String get _hostName => Uri.tryParse(_host)?.host ?? _host;
 
   static const _ua =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
       'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
 
+  /// origin / referer 恒写官方站:这两个头是**给 NAI 看的**,自建反代把请求原样
+  /// 转上去时改了反而对不上。自定义地址只换主机,不改请求的样子。
   Map<String, String> _genHeaders(String token) => {
     'Authorization': 'Bearer $token',
     'Content-Type': 'application/json',
@@ -211,7 +230,7 @@ class NaiClient {
     required Map<String, dynamic> body,
     GenAbort? abort,
   }) async* {
-    final uri = Uri.parse('$_imageHost/ai/generate-image-stream');
+    final uri = Uri.parse('$_host/ai/generate-image-stream');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 30);
     // 取消:强制关连接,进行中的请求/流随即断开抛错(对齐 web abort fetch)。
@@ -310,9 +329,9 @@ class NaiClient {
     } on TimeoutException {
       throw NaiException('生成超时,请重试');
     } on SocketException catch (e) {
-      throw NaiException('无法连接 NovelAI:${e.message}');
+      throw NaiException('无法连接 $_hostName:${e.message}');
     } on HandshakeException {
-      throw NaiException('TLS 握手失败,当前网络可能拦截了 novelai.net');
+      throw NaiException('TLS 握手失败,当前网络可能拦截了 $_hostName');
     } catch (e) {
       throw NaiException('流式生成失败:$e');
     } finally {
@@ -320,19 +339,34 @@ class NaiClient {
     }
   }
 
-  /// 非流式回退:POST /ai/generate-image → zip,解出首张 PNG 字节。
+  /// 一次性生成:POST /ai/generate-image → zip,解出首张 PNG 字节。
+  ///
+  /// 两种情况走这条:用户在生成设置里关了流式,或流式端点回 404/405。
+  /// 没有逐步预览 —— 整张图画完才回来。
+  ///
+  /// [abort] 一触发就关掉客户端,进行中的请求随即断开(同流式那条)。取消之后
+  /// 这里抛的是「网络错误」,调用方先看 `abort.aborted` 再判错误。
   Future<Uint8List> generateImage({
     required String token,
     required Map<String, dynamic> body,
+    GenAbort? abort,
   }) async {
-    final uri = Uri.parse('$_imageHost/ai/generate-image');
+    final uri = Uri.parse('$_host/ai/generate-image');
+    final client = http.Client();
+    abort?.whenAbort(() {
+      try {
+        client.close();
+      } catch (_) {}
+    });
     final http.Response resp;
     try {
-      resp = await http
+      resp = await client
           .post(uri, headers: _genHeaders(token), body: jsonEncode(body))
           .timeout(const Duration(seconds: 120));
     } catch (e) {
       throw NaiException('网络错误:$e');
+    } finally {
+      client.close();
     }
 
     if (resp.statusCode != 200) {
@@ -414,7 +448,7 @@ class NaiClient {
     String model = kNaiV5UpscaleModel,
     double declaredBlurSigma = 0,
   }) async {
-    final uri = Uri.parse('$_imageHost/ai/upscale');
+    final uri = Uri.parse('$_host/ai/upscale');
     final http.Response resp;
     try {
       resp = await http
@@ -441,7 +475,7 @@ class NaiClient {
   /// anlas = 固定额 + 已购额;isOpus = tier==3 且 active/宽限期(与 web `novelai.ts` 一致)。
   /// 同一份响应里还带 NAI 5 的额度电池(`usage`),见 [parseNaiUsage]。
   Future<NaiSubscription> subscription(String token) async {
-    final uri = Uri.parse('$_imageHost/user/subscription');
+    final uri = Uri.parse('$_host/user/subscription');
     final http.Response resp;
     try {
       resp = await http
@@ -478,7 +512,7 @@ class NaiClient {
     required double infoExtracted,
     required String model,
   }) async {
-    final uri = Uri.parse('$_imageHost/ai/encode-vibe');
+    final uri = Uri.parse('$_host/ai/encode-vibe');
     final http.Response resp;
     try {
       resp = await http

@@ -67,6 +67,7 @@ class _CredentialLoginSheetState extends ConsumerState<_CredentialLoginSheet> {
     try {
       // 密码只进派生,不落盘;留下的是 accessKey(续期凭证)+ JWT。
       // 内部按官网同款顺序尝试多种邮箱大小写形态。
+      // 邮箱登录是官方那条流程(第三方中转不发 NAI 账号),固定打官方。
       final (jwt, key) = await naiCredentialLoginFlow(
         _email.text,
         _password.text,

@@ -113,12 +113,13 @@ class VibeEncoder {
             model: model,
           );
     } else {
-      final token = await _ref.read(tokenProvider.future);
-      if (token == null || token.isEmpty) throw StateError('未设置令牌,无法编码');
+      // 主账号那把 —— 连它的接口地址一起,第三方的 key 得打自己那台机器。
+      final key = await _ref.read(primaryNaiKeyProvider.future);
+      if (key == null || key.token.isEmpty) throw StateError('未设置令牌,无法编码');
       enc = await _ref
-          .read(naiClientProvider)
+          .read(naiClientProvider(key.endpoint))
           .encodeVibe(
-            token: token,
+            token: key.token,
             imageBase64: base64Encode(image),
             infoExtracted: infoExtracted,
             model: model,

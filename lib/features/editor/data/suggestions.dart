@@ -75,7 +75,7 @@ int get transCacheRev => _transRev;
 
 /// 多译合一的字符串只留第一段——注音层单行绘制,太长只会画成省略号。
 /// 各来源(离线库/wiki 中文名 join/共享翻译库/LLM)在此统一兜底,
-/// [LocalTagDb.firstZh] 也转到这里,免得名单改一处漏一处。
+/// 离线词库建索引(`TagIndexSpec`)也走这里,免得名单改一处漏一处。
 ///
 /// **只在括号外切**。原先无脑取各分隔符的最小下标,而 Fate 系的作品名自带斜杠,
 /// 于是「玉藻前（命运/额外）」被切成「玉藻前（命运」——83 条角色名就这么断在
@@ -106,19 +106,14 @@ String? firstTransSegment(String? zh, {String? tag}) {
   return first.isEmpty ? null : first;
 }
 
-/// 反查缓存上限。**必须高于离线库全量**:进编辑器时 `LocalTagDb.warmTagMeta`
-/// 一次就灌进 7 万条译文 / 9 万条热度,而这里满了是整表清空 —— 上限写 20000
-/// 的话灌注途中自己清了三四次,最后只剩尾部那截最冷门的标签。词库按热度降序,
-/// 被清掉的恰恰是 1girl、solo 这些最常用的,注音层和补全反查全查不到。
-/// 2026-08-28 起灌注量涨到约 11.2 万(9.1 万正名 + 2.1 万别名,见
-/// `LocalTagDb._warmTagMeta` 第二遍),15 万仍留着约 3.8 万的网络回填余量 ——
-/// 而网络回填一次会话最多几十条,够得很。
-const _metaCap = 150000;
+/// 反查缓存上限。这里只装网络回填 —— 离线词库不进缓存,直接查索引(见
+/// [offlineTagMeta])。一次会话回填不过几十上百条,满了整表清空也只是回头再问。
+const _metaCap = 20000;
 
 /// 反查缓存的规范键:小写 + 下划线归空格 + 连续空白压成一个。
 ///
 /// **Danbooru 的 `_` 就是空格**,同一个标签两种写法都常见:app 自己的补全插入的是
-/// 空格形态(`Suggestion.text` = `tag.replaceAll('_', ' ')`,灌注也走这条),而从
+/// 空格形态(`Suggestion.text` = `tag.replaceAll('_', ' ')`,离线索引建库也走这条),而从
 /// Danbooru 复制、或从别处导入的提示词绝大多数是**下划线形态**。
 ///
 /// 2026-08-28 之前这里只做 `trim().toLowerCase()` —— 于是灌进缓存的是
@@ -131,7 +126,7 @@ String metaKey(String text) => text
     .replaceAll('_', ' ')
     .replaceAll(RegExp(r'\s+'), ' ');
 
-/// 回填某标签的中文名/热度(键见 [metaKey])。由 `TagCompletion` 与离线库灌注调用。
+/// 回填某标签的中文名/热度(键见 [metaKey])。由 `TagCompletion` 与 `TagTranslationService` 调用。
 /// 上限防无界增长(清空只影响反查显示,重查询即回填)。
 void cacheTagMeta(String text, {String? trans, int? count}) {
   final k = metaKey(text);
@@ -206,12 +201,11 @@ String? formatCount(int n) {
 
 // ---- 内置词库(占位) ----
 
-/// 灌注前的兜底译名。**只放离线库(`assets/danbooru.tsv`)没有的词** ——
-/// 这是个硬不变式,`translationOf` 是先查缓存、缓存空了才线性扫这里,所以:
-///   · 与库重复 → 冗余,白扫;
-///   · 与库**不一致** → 用户会在灌注完成的那一刻看到注音**跳字**。
-///     2026-08-28 清理前实测有 6 条这样的:`red eyes` 红眼→红眼睛、
-///     `bad anatomy` 解剖错误→身体结构崩坏、`yuuki asuna` 结城明日奈→亚丝娜…
+/// 离线库查不到时的兜底译名。**只放离线库(`assets/danbooru.tsv`)没有的词** ——
+/// `translationOf` 是先查缓存与离线库、都没有才线性扫这里,与库重复的条目永远
+/// 轮不到,白扫。(离线库还要开机灌注的年代,与库不一致的会在灌注完成那一刻让注音
+/// **跳字**,2026-08-28 清理前实测有 6 条:`red eyes` 红眼→红眼睛、
+/// `bad anatomy` 解剖错误→身体结构崩坏、`yuuki asuna` 结城明日奈→亚丝娜…)
 /// 留下的这几条是 NAI/SD 的质量词与描述词 —— 它们不是 Danbooru 标签,
 /// 词库里天生没有,而几乎每条提示词都会带。
 const _tags = <Suggestion>[
@@ -351,8 +345,19 @@ SuggestResult querySuggestions(String query, {bool alphabetical = false}) {
   );
 }
 
-/// 补全行要显示的中文:优先用结果自带的译名,缺则反查缓存
-/// (离线词库全量 + wiki/共享库/LLM 的网络回填)。
+// ---- 离线词库 ----
+
+/// 离线词库的同步反查,键是 [metaKey] 形态。由 `LocalTagDb.install` 在开机
+/// runApp 之前装上;读不出来时为 null,只剩网络回填与内置兜底。
+abstract interface class OfflineTagMeta {
+  String? transOf(String key);
+  int? countOf(String key);
+}
+
+OfflineTagMeta? offlineTagMeta;
+
+/// 补全行要显示的中文:优先用结果自带的译名,缺则反查
+/// (wiki/共享库/LLM 的网络回填 + 离线词库)。
 ///
 /// D 站来的行只有 `/api/tags/wiki` 那一路译名,wiki 没写中文别名就一直空着 ——
 /// 而同一个标签在离线词库里往往是有中文的,只是没人去查。
@@ -368,10 +373,10 @@ String? transOf(Suggestion s) {
   };
 }
 
-/// 供注音流反查某个已确定标签的中文翻译(先查网络回填缓存,再退回内置词库)
+/// 供注音流反查某个已确定标签的中文翻译(网络回填缓存 → 离线词库 → 内置兜底)
 String? translationOf(String text) {
   final t = metaKey(text);
-  final cached = _transCache[t];
+  final cached = _transCache[t] ?? offlineTagMeta?.transOf(t);
   if (cached != null) return cached;
   for (final s in _tags) {
     if (metaKey(s.text) == t) return s.trans;
@@ -385,7 +390,7 @@ String? translationOf(String text) {
 /// 反查某标签热度(词条栏用),<1000 或未知返回 null
 int? countOf(String text) {
   final t = metaKey(text);
-  final cached = _countCache[t];
+  final cached = _countCache[t] ?? offlineTagMeta?.countOf(t);
   if (cached != null && cached >= 1000) return cached;
   for (final s in [..._tags, ..._characters]) {
     if (metaKey(s.text) == t) return s.count >= 1000 ? s.count : null;

@@ -65,38 +65,92 @@ class AppearancePage extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 16),
+          const SettingsLabel('底部导航'),
+          SettingsCard(
+            children: [
+              _SwitchRow(
+                icon: Icons.auto_awesome,
+                title: '显示 AI 助手',
+                subtitle: '关掉后底栏不再显示 AI 入口',
+                value: ts.showAssistant,
+                onChanged: (v) =>
+                    notifier.patch((x) => x.copyWith(showAssistant: v)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
           const SettingsLabel('触感'),
           SettingsCard(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.vibration,
-                      size: 20,
-                      color: context.scheme.onSurfaceVariant,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        '振动反馈',
-                        style: context.texts.bodyMedium!.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    Switch(
-                      value: ts.haptics,
-                      onChanged: (v) =>
-                          notifier.patch((x) => x.copyWith(haptics: v)),
-                    ),
-                  ],
-                ),
+              _SwitchRow(
+                icon: Icons.vibration,
+                title: '振动反馈',
+                value: ts.haptics,
+                onChanged: (v) => notifier.patch((x) => x.copyWith(haptics: v)),
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 卡片里的一行开关。整行可点。
+class _SwitchRow extends StatelessWidget {
+  const _SwitchRow({
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.onChanged,
+    this.subtitle,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = context.scheme;
+    final sub = subtitle;
+    return InkWell(
+      onTap: () => onChanged(!value),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: scheme.onSurfaceVariant),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: context.texts.bodyMedium!.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (sub != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      sub,
+                      style: context.texts.labelSmall!.copyWith(
+                        color: scheme.outline,
+                        height: 1.5,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Switch(value: value, onChanged: onChanged),
+          ],
+        ),
       ),
     );
   }

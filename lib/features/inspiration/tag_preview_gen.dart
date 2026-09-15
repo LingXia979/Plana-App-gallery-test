@@ -10,6 +10,7 @@ import '../../core/net/backend_config.dart';
 import '../../core/net/bot_stream.dart';
 import '../../core/net/nai_client.dart';
 import '../../core/net/nai_gate.dart';
+import '../../core/store/gen_settings.dart';
 import '../generate/bot_request.dart';
 import '../generate/models.dart';
 import '../generate/nai_request.dart';
@@ -141,15 +142,26 @@ Future<Uint8List> generateTagPreview(
   // 两边一起 429。整段流都在槽里 —— 拿到首帧就放槽的话后半程仍在占着连接。
   // paid:预览就是一张正经的图,该扣的点一分不少,所以关了「使用点数」的 Key
   // 不参与。用哪把由闸门定。
-  final last = await ref.read(naiGateProvider).run(paid: true, (token) async {
+  // 关了流式就跟创作页一样走一次性端点(自定义接口可能只有那一个),
+  // 那时没有逐步进度,onStep 一次都不响 —— 调用方本就按不确定进度渲染。
+  final streaming = ref.read(genSettingsProvider).value?.streamGen ?? true;
+  final last = await ref.read(naiGateProvider).run(paid: true, (
+    token,
+    base,
+  ) async {
     if (token == null || token.isEmpty) {
       throw NaiException('请先在「我的」页设置 NovelAI API Token');
     }
+    // 打哪台机器跟着闸门给的那把 Key 走。
+    final client = ref.read(naiClientProvider(base));
+    if (!streaming) {
+      return client.generateImage(token: token, body: built.body);
+    }
     Uint8List? got;
-    await for (final f
-        in ref
-            .read(naiClientProvider)
-            .generateImageStream(token: token, body: built.body)) {
+    await for (final f in client.generateImageStream(
+      token: token,
+      body: built.body,
+    )) {
       got = f.bytes;
       onStep?.call(f.isFinal ? s.params.steps : (f.step ?? 0), s.params.steps);
       if (f.isFinal) break;

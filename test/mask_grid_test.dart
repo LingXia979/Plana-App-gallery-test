@@ -8,6 +8,7 @@ import 'package:plana_app/features/inpaint/inpaint_ops.dart';
 /// 不做光栅化 —— 所以往返必须一字不差,尺寸不符必须拒绝(否则会把
 /// 旧蒙版按错误的行宽铺上去,画面完全对不上)。
 void main() {
+  _prefsTests();
   MaskGrid painted(int w, int h) {
     final g = MaskGrid(w, h);
     g.paintDot(w / 2, h / 2, 64);
@@ -87,5 +88,54 @@ void main() {
       }
     }
     expect(outlineLength(g), closeTo(96, .01), reason: '内部 12 条边全省掉');
+  });
+}
+
+void _prefsTests() {
+  group('重绘偏好的存取', () {
+    test('一来一回不丢字段', () {
+      const p = InpaintPrefs(
+        brush: 88,
+        strength: 0.42,
+        assist: true,
+        mode: 'censor',
+        censorStyle: 'solid',
+        censorColor: 0xFFFFFFFF,
+      );
+      final back = InpaintPrefs.fromJson(p.toJson());
+      expect(back.brush, 88);
+      expect(back.strength, closeTo(0.42, 1e-9));
+      expect(back.assist, isTrue);
+      expect(back.mode, 'censor');
+      expect(back.censorStyle, 'solid');
+      expect(back.censorColor, 0xFFFFFFFF);
+    });
+
+    test('旧版本存的 JSON(没有新字段)读回来是默认值', () {
+      final old = InpaintPrefs.fromJson({
+        'brush': 60,
+        'strength': 0.5,
+        'assist': false,
+      });
+      expect(old.mode, 'paint');
+      expect(old.censorStyle, 'mosaic');
+      expect(old.censorColor, 0xFF000000);
+    });
+
+    test('认不出的模式一律回落 paint —— 枚举改名/降级装回来都不能崩', () {
+      expect(InpaintPrefs.fromJson({'mode': 'wat'}).mode, 'paint');
+      expect(InpaintPrefs.fromJson({'mode': 3}).mode, 'paint');
+      expect(InpaintPrefs.fromJson({'mode': null}).mode, 'paint');
+      expect(
+        InpaintPrefs.fromJson({'censorStyle': 'wat'}).censorStyle,
+        'mosaic',
+      );
+    });
+
+    test('笔刷与强度越界被夹回合法档', () {
+      expect(InpaintPrefs.fromJson({'brush': 9999}).brush, 400);
+      expect(InpaintPrefs.fromJson({'brush': -5}).brush, 4);
+      expect(InpaintPrefs.fromJson({'strength': 5}).strength, 1.0);
+    });
   });
 }

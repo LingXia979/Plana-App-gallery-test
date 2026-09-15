@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../../features/assistant/session_store.dart';
 import '../../features/gallery/gallery_store.dart';
 import '../../features/generate/workspace_store.dart';
 import '../../features/stats/key_ledger.dart';
@@ -21,6 +22,7 @@ class AppStores {
     this.workspace,
     this.gallery,
     this.ledger,
+    this.assistant,
     this.prefs,
   );
 
@@ -28,6 +30,9 @@ class AppStores {
   final WorkspaceStore workspace;
   final GalleryStore gallery;
   final KeyLedgerStore ledger;
+
+  /// AI 助手的对话存档,见 [AssistantStore]。
+  final AssistantStore assistant;
 
   /// 非机密设置(主题/生成参数/编辑器…),见 [PrefsStore]。
   final PrefsStore prefs;
@@ -42,6 +47,7 @@ class AppStores {
       WorkspaceStore(blobs, root),
       GalleryStore(blobs, root),
       KeyLedgerStore(root),
+      AssistantStore(blobs, root),
       PrefsStore.emptyForTest(root),
     );
   }
@@ -65,6 +71,7 @@ class AppStores {
     final workspace = WorkspaceStore(blobs, root);
     final gallery = GalleryStore(blobs, root);
     final ledger = KeyLedgerStore(root);
+    final assistant = AssistantStore(blobs, root);
     try {
       await blobs.ensureReady();
     } catch (_) {}
@@ -73,7 +80,8 @@ class AppStores {
     await workspace.load();
     await gallery.load();
     await ledger.load();
-    return AppStores._(blobs, workspace, gallery, ledger, prefs);
+    await assistant.load();
+    return AppStores._(blobs, workspace, gallery, ledger, assistant, prefs);
   }
 
   /// 退后台/失焦即刻把防抖窗口里的挂起状态落盘(进程被杀不丢)。
@@ -81,6 +89,7 @@ class AppStores {
     workspace.flush();
     gallery.flushIndex();
     ledger.flush();
+    assistant.flush();
   }
 
   /// 启动后台维护(避开首帧,延迟几秒):清选图器缓存垃圾 + 远端图缓存裁剪
@@ -95,6 +104,8 @@ class AppStores {
         final live = <String>{
           ...await workspace.liveRefs(),
           ...await gallery.liveRefs(),
+          // 漏了这行 = AI 助手里用户带的图在启动第 6 秒被 GC 掉
+          ...await assistant.liveRefs(),
         };
         await blobs.gc(live);
       } catch (_) {}

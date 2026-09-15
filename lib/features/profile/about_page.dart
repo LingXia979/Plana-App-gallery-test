@@ -120,6 +120,12 @@ class AboutPage extends StatelessWidget {
                 value: 'novelai.net',
                 onTap: () => _open(context, kNovelAiUrl),
               ),
+              SettingsRow(
+                icon: Icons.blur_on,
+                title: '自动打码模型',
+                value: 'anime_censor_detection',
+                onTap: () => _open(context, kCensorModelUrl),
+              ),
             ],
           ),
           const SizedBox(height: 16),

@@ -162,6 +162,28 @@ class PromptPresetsState {
   }
 }
 
+/// 按保存下来的顺序(id 列表)排。表里没有的 —— 新版本新增的内置档、刚导入的
+/// 自定义档 —— 按原序缀在末尾,不打乱用户已经排好的那一段。
+/// 顺序表为空(老存档 / 从没拖过)= 原序:内置档在前,自定义档按建档先后。
+List<PromptPreset> orderPromptPresets(
+  List<PromptPreset> presets,
+  List<String> order,
+) {
+  if (order.isEmpty) return presets;
+  final rank = <String, int>{};
+  for (var i = 0; i < order.length; i++) {
+    rank.putIfAbsent(order[i], () => i);
+  }
+  return [
+    ...[
+      for (final p in presets)
+        if (rank.containsKey(p.id)) p,
+    ]..sort((a, b) => rank[a.id]!.compareTo(rank[b.id]!)),
+    for (final p in presets)
+      if (!rank.containsKey(p.id)) p,
+  ];
+}
+
 final promptPresetsProvider =
     AsyncNotifierProvider<PromptPresetsNotifier, PromptPresetsState>(
       PromptPresetsNotifier.new,
@@ -179,6 +201,7 @@ class PromptPresetsNotifier extends AsyncNotifier<PromptPresetsState> {
   Future<PromptPresetsState> build() async {
     var activeId = 'heavy'; // web getActivePresetId 默认档
     var custom = const <PromptPreset>[];
+    var order = const <String>[];
     try {
       final f = await _file();
       if (await f.exists()) {
@@ -188,9 +211,20 @@ class PromptPresetsNotifier extends AsyncNotifier<PromptPresetsState> {
           for (final e in (j['custom'] as List? ?? const []))
             PromptPreset.fromJson(e as Map<String, dynamic>),
         ];
+        order = [
+          for (final e in (j['order'] as List? ?? const [])) e as String,
+        ];
       }
     } catch (_) {} // 损坏按初始状态处理
-    final presets = [...kDefaultPromptPresets, ...custom];
+    // 按 id 收一遍:手改坏的文件里若混进内置 id 或重复 id,列表里就会出现两条
+    // 同 id 的项 —— 管理页的拖动排序拿 id 当 key,撞 key 直接崩。内置档优先。
+    final byId = <String, PromptPreset>{
+      for (final p in kDefaultPromptPresets) p.id: p,
+    };
+    for (final p in custom) {
+      byId.putIfAbsent(p.id, () => p);
+    }
+    final presets = orderPromptPresets(byId.values.toList(), order);
     if (!presets.any((p) => p.id == activeId)) activeId = 'heavy';
     return PromptPresetsState(presets: presets, activeId: activeId);
   }
@@ -206,6 +240,9 @@ class PromptPresetsNotifier extends AsyncNotifier<PromptPresetsState> {
             for (final p in s.presets)
               if (!p.isDefault) p.toJson(),
           ],
+          // 内置档也能拖,顺序表因此连内置 id 一起存(自定义档的先后光看
+          // custom 数组也读得出来,但那样内置档的位置就丢了)。
+          'order': [for (final p in s.presets) p.id],
         }),
       );
     } catch (_) {} // 写失败只影响下次启动的恢复,忽略
@@ -215,6 +252,22 @@ class PromptPresetsNotifier extends AsyncNotifier<PromptPresetsState> {
     final s = await future;
     if (s.activeId == id || !s.presets.any((p) => p.id == id)) return;
     await _write(PromptPresetsState(presets: s.presets, activeId: id));
+  }
+
+  /// 拖动排序(管理页长按拾起)。顺序不只管管理页 —— 高级设置那个下拉照它排,
+  /// 常用的档拖到前面去就少翻一屏。
+  ///
+  /// **内置档也能拖**:动的只是位置,正/负文本仍恒用内置的(见 [_write])。
+  ///
+  /// 索引按 `onReorderItem` 语义:[to] 已经按「移除 [from] 之后」调整过。
+  Future<void> reorder(int from, int to) async {
+    final s = await future;
+    if (from == to) return;
+    if (from < 0 || from >= s.presets.length) return;
+    if (to < 0 || to >= s.presets.length) return;
+    final next = [...s.presets];
+    next.insert(to, next.removeAt(from));
+    await _write(PromptPresetsState(presets: next, activeId: s.activeId));
   }
 
   /// [suffixPositive] 缺省 false = 正向拼在提示词开头。
@@ -294,11 +347,9 @@ class PromptPresetsNotifier extends AsyncNotifier<PromptPresetsState> {
       byId[p.id] = p;
       n++;
     }
-    final merged = [
-      ...kDefaultPromptPresets,
-      for (final p in byId.values)
-        if (!p.isDefault) p,
-    ];
+    // byId 的插入序 = 当前显示顺序:覆盖已有档就地不动,新档缀在末尾 ——
+    // 导入不该把用户拖出来的顺序重排掉。
+    final merged = byId.values.toList();
     final active = activeId != null && merged.any((p) => p.id == activeId)
         ? activeId
         : s.activeId;
