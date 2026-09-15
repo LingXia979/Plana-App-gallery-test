@@ -1,8 +1,10 @@
+import 'dart:math' as math;
 import 'dart:ui' show BoxHeightStyle;
 
 import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/gestures.dart' show computePanSlop;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderProxyBox;
 
 import '../../../core/theme/app_theme.dart';
 import '../../../core/theme/editor_theme.dart';
@@ -95,7 +97,29 @@ class _AnnotatedFieldState extends State<AnnotatedField> {
 
   void _pointerUp() {
     _fingerDown = null;
+    if (_dragging) {
+      // 最后一下拖动排在帧尾的那次滚动可能松手后才跑:这一帧照样拦着,
+      // 不然松手那一下会被拽去露选区末尾(见 [_HandleDragReveal])
+      _revealHold = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealHold = false);
+    }
     _setDragging(false);
+  }
+
+  /// 松手后还要再拦一帧,见 [_pointerUp]。
+  bool _revealHold = false;
+
+  /// 拖手柄时贴边滚动留的边距,算法照抄 `EditableText._scheduleShowCaretOnScreen`:
+  /// 四边 20(TextField.scrollPadding 的默认值),底下再让出手柄。手柄尺寸与锚点
+  /// 都和行高无关,行高传 0 即可。
+  EdgeInsets get _revealPadding {
+    final h = _handles.getHandleSize(0).height;
+    final center =
+        h / 2 -
+        _handles.getHandleAnchor(TextSelectionHandleType.collapsed, 0).dy;
+    return const EdgeInsets.all(20).copyWith(
+      bottom: math.max(center + math.max(h, kMinInteractiveDimension) / 2, 20),
+    );
   }
 
   /// 兜底:手柄只在有焦点时挂着,焦点一丢它连同上面那层 [Listener] 一起拆掉,
@@ -214,26 +238,30 @@ class _AnnotatedFieldState extends State<AnnotatedField> {
                 ),
               // EditableText 无 textHeightBehavior 直参,靠 DefaultTextHeightBehavior
               // 下发 even——与上面两个绘制层同款行距,底色/注音才与字严格对齐。
-              DefaultTextHeightBehavior(
-                textHeightBehavior: _kEvenLeading,
-                child: TextField(
-                  key: _fieldKey,
-                  controller: widget.controller,
-                  focusNode: widget.focusNode,
-                  style: base.copyWith(color: scheme.onSurface),
-                  maxLines: null,
-                  cursorColor: pal.cursor,
-                  cursorWidth: _kCursorWidth,
-                  selectionControls: _handles,
-                  keyboardType: TextInputType.multiline,
-                  textInputAction: TextInputAction.newline,
-                  decoration: InputDecoration(
-                    isDense: true,
-                    isCollapsed: true,
-                    contentPadding: EdgeInsets.zero,
-                    border: InputBorder.none,
-                    hintText: widget.hint,
-                    hintStyle: base.copyWith(color: scheme.outline),
+              _HandleDragReveal(
+                active: () => _dragging || _revealHold,
+                padding: _revealPadding,
+                child: DefaultTextHeightBehavior(
+                  textHeightBehavior: _kEvenLeading,
+                  child: TextField(
+                    key: _fieldKey,
+                    controller: widget.controller,
+                    focusNode: widget.focusNode,
+                    style: base.copyWith(color: scheme.onSurface),
+                    maxLines: null,
+                    cursorColor: pal.cursor,
+                    cursorWidth: _kCursorWidth,
+                    selectionControls: _handles,
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    decoration: InputDecoration(
+                      isDense: true,
+                      isCollapsed: true,
+                      contentPadding: EdgeInsets.zero,
+                      border: InputBorder.none,
+                      hintText: widget.hint,
+                      hintStyle: base.copyWith(color: scheme.outline),
+                    ),
                   ),
                 ),
               ),
@@ -275,6 +303,68 @@ class _AnnotatedFieldState extends State<AnnotatedField> {
           );
         },
       ),
+    );
+  }
+}
+
+/// 拖手柄时,贴边滚动只跟着**挪动的那一端**走。
+///
+/// 安卓上拖起点手柄,框架每挪一下滚两次:当场把起点拉进视口(往上,
+/// `_bringIntoViewBySelectionState`),帧尾再带动画滚一次去露「选区末尾」
+/// (`_scheduleShowCaretOnScreen`:base 在前就露最后一段)—— 可拖起点时 base 照样
+/// 在前,露的是没动的那一头(往下)。一上一下,往上划选就来回抽。往下拖时两次都
+/// 指向末尾,所以只坏往上这一边。
+///
+/// 拖动期间:带动画的那次丢掉,当场那次补上框架原本会留的边距 —— 往下拖、拖单个
+/// 光标,最后停的位置和原来一样。
+class _HandleDragReveal extends SingleChildRenderObjectWidget {
+  const _HandleDragReveal({
+    required this.active,
+    required this.padding,
+    super.child,
+  });
+
+  /// 现读,不等重建:拖动状态由手柄上的 [Listener] 同步改,框架的滚动请求紧跟着就到。
+  final bool Function() active;
+  final EdgeInsets padding;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderHandleDragReveal(active, padding);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderHandleDragReveal renderObject,
+  ) {
+    renderObject
+      ..active = active
+      ..padding = padding;
+  }
+}
+
+class _RenderHandleDragReveal extends RenderProxyBox {
+  _RenderHandleDragReveal(this.active, this.padding);
+
+  bool Function() active;
+  EdgeInsets padding;
+
+  @override
+  void showOnScreen({
+    RenderObject? descendant,
+    Rect? rect,
+    Duration duration = Duration.zero,
+    Curve curve = Curves.ease,
+  }) {
+    if (active()) {
+      if (duration > Duration.zero) return;
+      if (rect != null) rect = padding.inflateRect(rect);
+    }
+    super.showOnScreen(
+      descendant: descendant,
+      rect: rect,
+      duration: duration,
+      curve: curve,
     );
   }
 }
