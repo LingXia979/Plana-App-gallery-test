@@ -62,9 +62,9 @@ class CompletionSourcePrefNotifier extends AsyncNotifier<CompletionSource?> {
 /// `/tags/translate`、`/tags/naturalize` —— 实测全是公开的,无会话照样 200。
 /// 当初卡会话是照搬「后端功能 = 要授权」的惯例,并非接口本身的要求。
 ///
-/// 无会话时唯一拿不到的是**画师串 / OC 两个分组**(`/api/artists/list`、`/api/oc/list`
-/// 返 401)—— 那是用户挂在 Bot 账号下的私有数据,本来就该拿不到,且 [ArtistOcLibrary]
-/// 对空会话已经 fail-soft 返空,不会报错也不会拖慢别的分组。
+/// 无会话时唯一拿不到的是**公共库的画师串 / OC**(`/api/artists/list`、`/api/oc/list`
+/// 返 401)—— 那两个接口要登录,[ArtistOcLibrary] 对空会话已经 fail-soft 返空,
+/// 不会报错也不会拖慢别的分组;本机灵感库里的 OC 照样补得出来。
 ///
 /// 所以现在一律默认增强;用户仍可在设置里显式切到离线词库(自建后端不可达、
 /// 或就是不想让打字联网的场景)。

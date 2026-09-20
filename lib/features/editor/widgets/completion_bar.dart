@@ -114,7 +114,8 @@ class CompletionBar extends StatelessWidget {
     // 而角色·作品退役本地库、全量改走上游之后条数明显变多(autocomplete 一次
     // 12 条、语义搜词 20 条),把 OC 挤出了屏幕:用户打自己 OC 的名字,得往右滑
     // 过一串 D 站角色才看得到。自有库条数少(各 limit 5)、匹配精确,而且会去打
-    // 那个名字本来就是冲它来的,理应先露面;上游那些是补充。
+    // 那个名字本来就是冲它来的,理应先露面;上游那些是补充。OC 里本地库的
+    // 又排在公共库前面(引擎给的就是这个顺序)。
     //
     // 形态 B(展开面板)的分组顺序同理,两边保持一致。
     final entities = [
@@ -272,15 +273,15 @@ class CompletionBar extends StatelessWidget {
     );
   }
 
-  /// chip 副标题。横向态没有分节标题,光靠图标分不清 OC 与画师串,
-  /// 所以这两类直接写类型名;角色带作品来源;其余用译文。
+  /// chip 副标题。OC 写来源(「本地库」/ 公共库作者);画师串写类型名 ——
+  /// 横向态没有分节标题,光靠图标不好认;角色带作品来源;其余用译文。
   ///
   /// 译文走 [transOf] 而非 `s.trans`:D 站来的行自带译名只有 wiki 那一路,
   /// 反查缓存(离线词库 / 共享翻译库 / LLM 回填)里的得现查。
   String? _subtitle(Suggestion s) {
     switch (s.kind) {
       case SuggestionKind.oc:
-        return '原创角色';
+        return s.source;
       case SuggestionKind.artist:
         return '画风';
       case SuggestionKind.character:

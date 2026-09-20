@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,12 +6,16 @@ import 'package:http/http.dart' as http;
 
 import '../../../core/auth/bot_session_store.dart';
 import '../../../core/net/backend_config.dart';
+import '../../inspiration/tag_models.dart';
 import 'suggestions.dart';
 
 /// 画师串 + OC 库(增强模式,需 Bearer session)。
 /// `GET /api/artists/list` + `GET /api/oc/list`,内存缓存(会话生命周期)。
 /// **画师插 `artist_string`、OC 插 `tag_group`**——web 包成 `<<marker>>` 但发送前会被
 /// `cleanPromptMarkers` 剥成裸内容,故直接插裸载荷等价。归属默认 all(不按 mine 过滤)。
+///
+/// `/api/oc/list` 是**公共库**。补全时再并上本机灵感库的角色条目(见 [search]);
+/// 公共库的 OC 底行写作者,所以顺带拉一份作者目录 `GET /api/public/authors`。
 class ArtistOcLibrary {
   ArtistOcLibrary(this.baseUrl, this.sessionId, this._client);
 
@@ -20,6 +25,9 @@ class ArtistOcLibrary {
 
   List<_Artist>? _artists;
   List<_Oc>? _ocs;
+
+  /// 归属 id(QQ 号)→ 昵称。拉不到就是空表,底行回落成归属 id。
+  Map<String, String> _authors = const {};
   Future<void>? _loading;
 
   Future<void> _ensureLoaded() {
@@ -34,22 +42,30 @@ class ArtistOcLibrary {
       return;
     }
     final headers = {'Authorization': 'Bearer $sessionId'};
-    try {
-      final r = await _client
-          .get(Uri.parse('$baseUrl/api/artists/list'), headers: headers)
-          .timeout(const Duration(seconds: 15));
-      _artists = _parseArtists(r);
-    } catch (_) {
-      _artists = const [];
+    // 三份互不依赖,并行拉 —— 第一次补全要等它们齐了才出结果。各自 fail-soft。
+    Future<T> fetch<T>(
+      String path,
+      T Function(http.Response) parse,
+      T empty,
+    ) async {
+      try {
+        final r = await _client
+            .get(Uri.parse('$baseUrl$path'), headers: headers)
+            .timeout(const Duration(seconds: 15));
+        return parse(r);
+      } catch (_) {
+        return empty;
+      }
     }
-    try {
-      final r = await _client
-          .get(Uri.parse('$baseUrl/api/oc/list'), headers: headers)
-          .timeout(const Duration(seconds: 15));
-      _ocs = _parseOcs(r);
-    } catch (_) {
-      _ocs = const [];
-    }
+
+    final (artists, ocs, authors) = await (
+      fetch('/api/artists/list', _parseArtists, const <_Artist>[]),
+      fetch('/api/oc/list', _parseOcs, const <_Oc>[]),
+      fetch('/api/public/authors', _parseAuthors, const <String, String>{}),
+    ).wait;
+    _artists = artists;
+    _ocs = ocs;
+    _authors = authors;
   }
 
   List<_Artist> _parseArtists(http.Response r) {
@@ -90,15 +106,46 @@ class ArtistOcLibrary {
           if (x is String && x.isNotEmpty) aliases.add(x);
         }
       }
-      out.add(_Oc(name, en, group, aliases));
+      out.add(_Oc(name, en, group, aliases, _ownerOf(o)));
+    }
+    return out;
+  }
+
+  /// 条目归属:owner_id 优先,存量数据回退 created_by(同服务端 `_author_key`)。
+  /// 老数据那一栏可能是数字,也可能直接写的名字。
+  static String? _ownerOf(Map o) {
+    for (final v in [o['owner_id'], o['created_by']]) {
+      final s = v is String ? v.trim() : (v is int ? '$v' : '');
+      if (s.isNotEmpty) return s;
+    }
+    return null;
+  }
+
+  Map<String, String> _parseAuthors(http.Response r) {
+    if (r.statusCode != 200) return const {};
+    final j = jsonDecode(utf8.decode(r.bodyBytes));
+    final list = (j is Map) ? j['authors'] : null;
+    if (list is! List) return const {};
+    final out = <String, String>{};
+    for (final a in list) {
+      if (a is! Map) continue;
+      final id = a['user_id'], nick = a['nickname'];
+      if (id is String && nick is String && nick.trim().isNotEmpty) {
+        out[id] = nick.trim();
+      }
     }
     return out;
   }
 
   /// 画师匹配名字子串;OC 匹配名字/别名子串。→ (artists, ocs)。
+  ///
+  /// OC 两处来源,各取前 [limit] 个:[localOcs](本机灵感库的角色条目)在前,底行
+  /// 写「本地库」;公共库的接在后面,底行写作者。公共库里本地已经有的(收藏来的 /
+  /// 自己发布的副本,按 publicId 或同名认,同 `TagLibrary.isCollected`)不再出第二遍。
   Future<(List<Suggestion>, List<Suggestion>)> search(
     String query, {
     int limit = 5,
+    List<TagEntry> localOcs = const [],
   }) async {
     try {
       await _ensureLoaded();
@@ -125,25 +172,48 @@ class ArtistOcLibrary {
         if (aOut.length >= limit) break;
       }
     }
-    final oOut = <Suggestion>[];
-    for (final o in ocs) {
-      final hit =
-          o.name.toLowerCase().contains(q) ||
-          o.aliases.any((x) => x.toLowerCase().contains(q));
-      if (hit) {
-        oOut.add(
+
+    bool ocHit(String name, List<String> aliases) =>
+        name.toLowerCase().contains(q) ||
+        aliases.any((x) => x.toLowerCase().contains(q));
+
+    final localOut = <Suggestion>[];
+    final mineIds = <String>{}, mineNames = <String>{};
+    for (final e in localOcs) {
+      final name = e.name.trim(), group = e.positive.trim();
+      if (name.isEmpty || group.isEmpty) continue;
+      mineNames.add(name);
+      if (e.publicId case final id?) mineIds.add(id);
+      if (localOut.length < limit && ocHit(name, e.aliases)) {
+        localOut.add(
           Suggestion(
-            text: o.name,
+            text: name,
             kind: SuggestionKind.oc,
-            trans: (o.en != null && o.en != o.name) ? o.en : null,
-            note: '插入角色配置',
-            insertText: o.tagGroup,
+            source: '本地库',
+            insertText: group,
+            local: true,
           ),
         );
-        if (oOut.length >= limit) break;
       }
     }
-    return (aOut, oOut);
+    final publicOut = <Suggestion>[];
+    for (final o in ocs) {
+      if (publicOut.length >= limit) break;
+      if (mineIds.contains(o.en) || mineNames.contains(o.name.trim())) continue;
+      if (!ocHit(o.name, o.aliases)) continue;
+      publicOut.add(
+        Suggestion(
+          text: o.name,
+          kind: SuggestionKind.oc,
+          trans: (o.en != null && o.en != o.name) ? o.en : null,
+          // 目录里没有昵称就写归属 id(QQ 号,老数据里也可能就是名字),
+          // 连归属都没有才写「公共库」
+          source: _authors[o.owner] ?? o.owner ?? '公共库',
+          insertText: o.tagGroup,
+        ),
+      );
+    }
+    return (aOut, [...localOut, ...publicOut]);
   }
 }
 
@@ -154,11 +224,14 @@ class _Artist {
 }
 
 class _Oc {
-  _Oc(this.name, this.en, this.tagGroup, this.aliases);
+  _Oc(this.name, this.en, this.tagGroup, this.aliases, this.owner);
   final String name;
   final String? en;
   final String tagGroup;
   final List<String> aliases;
+
+  /// 归属 id,见 [ArtistOcLibrary._ownerOf]。
+  final String? owner;
 }
 
 /// 按后端基址 + 会话构造(任一变即重建,缓存刷新)。

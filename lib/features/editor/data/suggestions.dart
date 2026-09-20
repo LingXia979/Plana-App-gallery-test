@@ -15,6 +15,7 @@ class Suggestion {
     this.count = 0,
     this.insertText,
     this.natural = false,
+    this.local = false,
   });
 
   /// 英文标签 / 实体名
@@ -28,13 +29,16 @@ class Suggestion {
   /// 「翻译为英文」自然语言行:选中时才把 [text](中文)整句翻成英文再替换。
   final bool natural;
 
+  /// 出自本机的灵感库,而不是后端公共库。目前只有 OC 两边都有,本地的排前面。
+  final bool local;
+
   /// 中文翻译
   final String? trans;
 
-  /// 来源作品(角色用)
+  /// 来源。角色 = 出处作品;OC = 「本地库」或公共库作者(见 `ArtistOcLibrary.search`)。
   final String? source;
 
-  /// 附注(OC/作品的插入说明)
+  /// 附注(作品的插入说明)
   final String? note;
 
   /// 热度(0 = 不显示)
@@ -49,6 +53,7 @@ class Suggestion {
     int? count,
     String? insertText,
     bool? natural,
+    bool? local,
   }) => Suggestion(
     text: text ?? this.text,
     kind: kind ?? this.kind,
@@ -58,6 +63,7 @@ class Suggestion {
     count: count ?? this.count,
     insertText: insertText ?? this.insertText,
     natural: natural ?? this.natural,
+    local: local ?? this.local,
   );
 }
 

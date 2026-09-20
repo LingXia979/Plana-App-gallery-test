@@ -16,7 +16,7 @@ import 'completion_bar.dart' show CompletionGrip, suggestionGlyph;
 ///
 /// 结构(只借设计稿布局,图标与配色沿用现有 [suggestionGlyph] + M3 语义色):
 /// - 抓手 + 头部(`补全结果` · 项数 · 热度/字母排序切换)
-/// - 分节:画师 / 角色 / 我的 OC / 作品 / 标签,各带彩色图标 + 计数 + 细分隔线,节标题点按折叠
+/// - 分节:画师 / OC / 角色 / 作品 / 标签,各带彩色图标 + 计数 + 细分隔线,节标题点按折叠
 /// - 每行:名 + 译文/来源 · 热度 · 👁 预览(作品行为骰子随机抽取)· `+` 连续插入
 /// - 👁 只给标签 / 角色:画师串与 OC 在 Danbooru 上没有词条,点开必空
 class CompletionPanel extends ConsumerStatefulWidget {
@@ -104,14 +104,15 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
     );
   }
 
+  /// 热度 / 字母只在组内排:本地库的 OC 始终在公共库前面(同 completion_bar)。
   List<Suggestion> _sorted(List<Suggestion> xs) {
-    final c = [...xs];
-    if (_byHeat) {
-      c.sort((a, b) => b.count.compareTo(a.count));
-    } else {
-      c.sort((a, b) => a.text.toLowerCase().compareTo(b.text.toLowerCase()));
-    }
-    return c;
+    int cmp(Suggestion a, Suggestion b) => _byHeat
+        ? b.count.compareTo(a.count)
+        : a.text.toLowerCase().compareTo(b.text.toLowerCase());
+    return [
+      ...xs.where((s) => s.local).toList()..sort(cmp),
+      ...xs.where((s) => !s.local).toList()..sort(cmp),
+    ];
   }
 
   /// 行副标题。译文走 [transOf] 而非 `s.trans`:D 站来的行自带译名只有
@@ -129,7 +130,7 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
           s.note,
         ].whereType<String>().where((e) => e.isNotEmpty).join(' · ');
       case SuggestionKind.oc:
-        return s.note ?? s.trans;
+        return s.source; // 「本地库」/ 公共库作者
       case SuggestionKind.tag:
         return transOf(s);
       case SuggestionKind.artist:
@@ -141,11 +142,12 @@ class _CompletionPanelState extends ConsumerState<CompletionPanel> {
   Widget build(BuildContext context) {
     final scheme = context.scheme;
 
-    // 自有库(画师 / 我的 OC)在前,上游的角色·作品在后 —— 同 completion_bar,
-    // 理由见那里:上游角色条数多,夹在中间会把「我的 OC」顶到要滚很久才看得到。
+    // 自有库(画师 / OC)在前,上游的角色·作品在后 —— 同 completion_bar,
+    // 理由见那里:上游角色条数多,夹在中间会把 OC 顶到要滚很久才看得到。
+    // OC 一节里公共库别人的也在(底行写作者),所以节名不叫「我的 OC」。
     final sections = <(SuggestionKind, String, List<Suggestion>)>[
       (SuggestionKind.artist, '画师', widget.result.artists),
-      (SuggestionKind.oc, '我的 OC', widget.result.ocs),
+      (SuggestionKind.oc, 'OC', widget.result.ocs),
       (SuggestionKind.character, '角色', widget.result.characters),
       (SuggestionKind.work, '作品', widget.result.works),
       (SuggestionKind.tag, '标签', widget.result.tags),

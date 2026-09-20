@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../../../core/net/backend_config.dart';
+import '../../inspiration/tag_library.dart';
+import '../../inspiration/tag_models.dart';
 import 'artist_oc_library.dart';
 import 'completion_source.dart';
 import 'local_tag_db.dart';
@@ -40,6 +42,7 @@ class TagCompletion {
     required this.baseUrl,
     required this.localDb,
     required this.artistOcLib,
+    this.localOcs,
     http.Client? client,
   }) : _client = client ?? http.Client();
 
@@ -54,6 +57,10 @@ class TagCompletion {
 
   /// 画师/OC 库(增强模式合并)。角色·作品不再走本地库,见 [_enhanced]。
   final ArtistOcLibrary artistOcLib;
+
+  /// 本机灵感库的角色条目,和公共库的 OC 一起并进补全(本地在前,见
+  /// [ArtistOcLibrary.search])。给 future 是因为第一次查询时库可能还没读完盘。
+  final Future<List<TagEntry>>? localOcs;
 
   final http.Client _client;
 
@@ -224,7 +231,9 @@ class TagCompletion {
   Future<SuggestResult> _enhanced(String q, bool cjk) async {
     if (baseUrl.isEmpty) return const SuggestResult();
     final tagsF = cjk ? _enhancedChineseTags(q) : _enhancedEnglishTags(q);
-    final aoF = artistOcLib.search(q);
+    final aoF = (localOcs ?? Future.value(const <TagEntry>[])).then(
+      (local) => artistOcLib.search(q, localOcs: local),
+    );
     final tags = await tagsF;
     final (artists, ocs) = await aoF;
 
@@ -552,6 +561,14 @@ final tagCompletionProvider = Provider<TagCompletion>((ref) {
     baseUrl: base,
     localDb: ref.watch(localTagDbProvider),
     artistOcLib: ref.watch(artistOcLibraryProvider),
+    // watch 的是 .future:第一次查询等盘读完;之后库里一有增删改就重建,
+    // 查询缓存跟着作废 —— 不然刚在灵感页建的 OC 要等缓存清掉才补得出来。
+    localOcs: ref
+        .watch(tagLibraryProvider.future)
+        .then(
+          (lib) => lib.of(TagCategory.character),
+          onError: (Object _) => const <TagEntry>[],
+        ),
   );
   ref.onDispose(tc.dispose);
   return tc;
