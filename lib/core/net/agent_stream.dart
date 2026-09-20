@@ -11,8 +11,11 @@
 ///   `degraded`                  → [AgentDegraded]
 ///   `final`                     → [AgentDone](流的最后一个事件)
 ///   `error`                     → 抛 [BackendException]
-/// 其余(`agent_token` 等)静默丢弃 —— 逐 token 展示会把 `<Think>` 段漏给用户
-/// (后端是在 final 才剥的标签)。
+/// 其余(`agent_token` 等)静默丢弃 —— 后端现在压根不发(走的是 `.run()`),
+/// 而且真要接上也不能原样显示:`<Think>` 段与围栏是 final 才剥的,逐 token 漏给
+/// 用户就是把模型的草稿纸摊开。自填接口那条已经在 app 内自己剥好了再发
+/// [AgentDelta](见 direct_agent 的 `directStreamView`),后端这条照那个口径补齐
+/// 之后就能直接接上。
 library;
 
 import 'dart:async';
@@ -48,6 +51,20 @@ class AgentToolResult extends AgentEvent {
 /// 软降级(上游拒绝后退到安全模式)。图照出,只是这轮质量可能打折。
 class AgentDegraded extends AgentEvent {
   const AgentDegraded();
+}
+
+/// 模型正在写这一跳的回复(目前只有自填接口那条会发)。
+///
+/// 带的是**到此刻为止的全量**,不是增量:`</Think>` 收尾、换一跳重写时正文会整段
+/// 挪位,拼增量得在两头各留一套回退,每帧重算一份便宜得多。拿到就整块替换。
+class AgentDelta extends AgentEvent {
+  const AgentDelta({this.text = '', this.reasoning = ''});
+
+  /// 能直接摆进气泡的正文:`<Think>` 段与 ```tool_call / ```nai_draw 围栏已剔掉。
+  final String text;
+
+  /// 思考过程:模型原生的 reasoning 字段 + 正文里的 `<Think>` 段。
+  final String reasoning;
 }
 
 /// 终态。拿到它这一轮就结束了,后面不会再有事件。

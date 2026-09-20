@@ -1,8 +1,9 @@
 /// 直连自定义接口那条:在 app 里跑一遍 agent 循环,吐出与 `streamAgentPrompt`
 /// 完全一样的 [AgentEvent] 流。
 ///
-/// **下游一个字都不用改**:结果卡、导入、生成、内联出图只认这四个事件和
+/// **下游一个字都不用改**:结果卡、导入、生成、内联出图只认这几个事件和
 /// [AgentResult],不知道字节是从 Plana 后端来的还是从用户自己的模型来的。
+/// (逐字显示的 [AgentDelta] 目前只有这条发 —— 服务端那条还没开流,见 agent_stream。)
 ///
 /// 三件事和服务端那条对齐,不能自己另发明一套:
 ///   · **提示词**用规则主体([PresetRule]),与服务端那条是同一份:自定义过就用自定义的,
@@ -58,6 +59,22 @@ final _thinkTag = RegExp(
   dotAll: true,
   caseSensitive: false,
 );
+
+// 流到一半时切正文用的几把尺子(见 [directStreamView])。整段的 [_thinkTag] 在这里
+// 不够用 —— 流中途的 `<Think>` 多半还没收尾,那就得按「开标签之后全是思考」算。
+final _thinkOpen = RegExp(r'<Think>', caseSensitive: false);
+final _thinkClose = RegExp(r'</Think>', caseSensitive: false);
+final _liveFenceOpen = RegExp(
+  r'```[ \t]*(?:tool_call|nai_draw)',
+  caseSensitive: false,
+);
+
+/// 收到一半的标签 / 围栏头(`<Thi`、` ```na `)。显示出来是一闪一闪的乱码,
+/// 而下一帧它们本来就会被认出来,少显示一帧不亏。
+///
+/// 反引号后面**必须跟着字母**才算:光秃秃的 ``` 多半是代码块的收尾、`…` 是行内
+/// 代码的收尾,切掉反而把好好的块拆了。
+final _liveTail = RegExp(r'(?:<[A-Za-z/]{0,6}|`{1,3}[ \t]*[A-Za-z_]{1,9})$');
 
 /// 附图:MIME + base64。
 typedef DirectImage = ({String mime, String data});
@@ -312,14 +329,20 @@ Stream<AgentEvent> streamDirectPrompt({
 
     for (var hop = 0; hop < _maxHops; hop++) {
       final hopStart = trace?.sinceStart() ?? 0;
-      final raw = await _callModel(
+      final buf = StringBuffer();
+      await for (final d in directModelStream(
         client,
         endpoint,
         system: system,
         msgs: msgs,
         think: think,
         timeout: timeout,
-      );
+        out: buf,
+      )) {
+        yield d;
+      }
+      final raw = buf.toString();
+      if (raw.trim().isEmpty) throw BackendException('模型回了一段空的');
       final hopRec = <String, Object?>{
         't': hopStart,
         'ms': (trace?.sinceStart() ?? 0) - hopStart,
@@ -623,50 +646,223 @@ Future<Object?> _serverTool(
 Map<String, String> _auth(String sessionId) =>
     sessionId.isEmpty ? const {} : {'Authorization': 'Bearer $sessionId'};
 
-/// 打一次模型,拿整段正文。三家的请求体和取文字段各不相同。
+/// 两帧之间至少隔这么久。快的模型一秒吐几十个 token,一个 token 推一帧等于每秒
+/// 几十次整块重建(气泡里是按围栏分块的富文本);60ms 一帧看着仍然是连续在写。
+const _liveFrameMs = 60;
+
+/// 打一次模型,边收边吐。
 ///
-/// **不走流式**:这条链路的产出是「一段回复 + 一个围栏」,围栏没收完解析不了,
-/// 逐 token 显示也只能显示到一半就要撤回。服务端那条同样是 `.run()` 不是
-/// `.run_stream()`,理由一样。
-Future<String> _callModel(
+/// 每帧 [AgentDelta] 带的是**到此刻为止**的正文与思考(整块替换,理由见那边),
+/// 整段原文写进 [out] —— 这条链路的产出是「一段回复 + 一个围栏」,围栏收完才解析
+/// 得了,所以**流只管显示**,解析照旧在 [parseDirectReply] / [parseToolCalls]。
+///
+/// [timeout] 不再是整轮上限,而是「等响应头」和「两帧之间」各自的静默上限:
+/// 长回复本来就写得过一分钟,按整轮掐必然误杀;而只要还在吐字就说明活着。
+///
+/// 中转不认流式(回的不是 `text/event-stream`)时,收完整个 body 按老路解析,
+/// 只是没有逐字效果 —— 不能因为这个就让人用不了。
+Stream<AgentDelta> directModelStream(
   http.Client c,
   CustomEndpoint e, {
   required String system,
   required List<DirectMsg> msgs,
   required ThinkLevel think,
   required Duration timeout,
-}) async {
-  // 路径可配(中转改路径是常事),Gemini 那条还把模型名写在路径里 ——
-  // 两件事都由 CustomEndpoint.chatUri 处理,这儿不再各拼各的。
-  final uri = e.chatUri;
+  required StringBuffer out,
+}) async* {
+  // 路径可配(中转改路径是常事),Gemini 那条还把模型名写在路径里、开流还要换方法名
+  // —— 都由 CustomEndpoint 处理,这儿不再各拼各的。
+  final uri = e.chatStreamUri;
   final (headers, body) = directRequest(
     e,
     system: system,
     msgs: msgs,
     think: think,
+    stream: true,
   );
+  final req = http.Request('POST', uri)
+    ..headers.addAll({
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      ...headers,
+    })
+    ..bodyBytes = utf8.encode(jsonEncode(body));
 
-  final http.Response r;
+  final http.StreamedResponse resp;
   try {
-    r = await c
-        .post(
-          uri,
-          headers: {'Content-Type': 'application/json', ...headers},
-          body: jsonEncode(body),
-        )
-        .timeout(timeout);
+    resp = await c.send(req).timeout(timeout);
   } on TimeoutException {
     throw BackendException('模型没在时限内回复');
   } catch (_) {
     throw BackendException('连不上 ${uri.host}');
   }
-  final decoded = jsonDecode(utf8.decode(r.bodyBytes));
-  if (r.statusCode < 200 || r.statusCode >= 300) {
-    throw BackendException(_errorOf(decoded, r.statusCode));
+
+  if (resp.statusCode < 200 || resp.statusCode >= 300) {
+    final raw = await resp.stream.bytesToString().timeout(timeout);
+    throw BackendException(_errorOf(_tryJson(raw), resp.statusCode));
   }
-  final text = extractReplyText(e.format, decoded);
-  if (text.trim().isEmpty) throw BackendException('模型回了一段空的');
-  return text;
+  final Stream<String> lines;
+  if ((resp.headers['content-type'] ?? '').toLowerCase().contains(
+    'event-stream',
+  )) {
+    lines = resp.stream
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .timeout(
+          timeout,
+          onTimeout: (sink) => sink.addError(BackendException('模型写到一半没声了')),
+        );
+  } else {
+    final raw = await resp.stream.bytesToString().timeout(timeout);
+    final text = extractReplyText(e.format, _tryJson(raw));
+    if (text.isNotEmpty || !raw.contains('data:')) {
+      out.write(text); // 空的话由调用方报「模型回了一段空的」
+      if (text.isNotEmpty) yield _liveDelta(out, StringBuffer());
+      return;
+    }
+    // 类型写着 json、身子却是一串 SSE 帧 —— 有的中转就这德行。按帧收,
+    // 只是整段一起到,没有逐字效果。
+    lines = Stream.fromIterable(const LineSplitter().convert(raw));
+  }
+
+  final reason = StringBuffer();
+  var lastFrame = 0;
+  await for (final line in lines) {
+    // `event:` 行与 `:` 心跳不看:三家的 data 自带类型,光看 data 就够
+    if (!line.startsWith('data:')) continue;
+    final data = line.substring(5).trim();
+    if (data.isEmpty || data == '[DONE]') continue;
+    final frame = _tryJson(data);
+    // Claude 的报错是流中间的一帧,不是 HTTP 状态码
+    if (frame is Map && frame['type'] == 'error') {
+      throw BackendException(_errorOf(frame, resp.statusCode));
+    }
+    final d = directDelta(e.format, frame);
+    if (d.text.isEmpty && d.reasoning.isEmpty) continue;
+    out.write(d.text);
+    reason.write(d.reasoning);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - lastFrame < _liveFrameMs) continue;
+    lastFrame = now;
+    yield _liveDelta(out, reason);
+  }
+  // 收尾补一帧:最后几个字多半还卡在上面那道攒帧里
+  yield _liveDelta(out, reason);
+}
+
+AgentDelta _liveDelta(StringBuffer raw, StringBuffer reason) {
+  final v = directStreamView(raw.toString());
+  return AgentDelta(
+    text: v.body,
+    reasoning: [
+      reason.toString().trim(),
+      v.think,
+    ].where((s) => s.isNotEmpty).join('\n'),
+  );
+}
+
+Object? _tryJson(String s) {
+  try {
+    return jsonDecode(s);
+  } catch (_) {
+    return null; // 不是 JSON:当没有错误体,按状态码报
+  }
+}
+
+/// 流式响应的一帧 → 这一帧新增的字。三家形状各不相同,抽出来单测 —— 认错字段的
+/// 表现是「一路空白、最后整段蹦出来」,跟模型自己慢分不出来。
+///
+/// 思考在三家都是正文之外的另一个字段,所以分两路回:
+///   · OpenAI:`delta.reasoning_content`(DeepSeek 那套)或 `delta.reasoning`(OpenRouter)
+///   · Gemini:`parts[]` 里 `thought` 为真的那几段
+///   · Claude:`thinking_delta`
+({String text, String reasoning}) directDelta(
+  AgentApiFormat format,
+  Object? frame,
+) {
+  const none = (text: '', reasoning: '');
+  if (frame is! Map) return none;
+  switch (format) {
+    case AgentApiFormat.openai:
+      final choices = frame['choices'];
+      if (choices is! List || choices.isEmpty) return none;
+      final first = choices.first;
+      if (first is! Map) return none;
+      final d = first['delta'];
+      // 老式补全接口没有 delta,只有 text
+      if (d is! Map) {
+        return (text: first['text'] is String ? first['text'] as String : '',
+                reasoning: '');
+      }
+      final r = d['reasoning_content'] ?? d['reasoning'];
+      return (
+        text: d['content'] is String ? d['content'] as String : '',
+        reasoning: r is String ? r : '',
+      );
+    case AgentApiFormat.google:
+      final cands = frame['candidates'];
+      if (cands is! List || cands.isEmpty) return none;
+      final first = cands.first;
+      if (first is! Map) return none;
+      final parts = (first['content'] as Map?)?['parts'];
+      if (parts is! List) return none;
+      final text = StringBuffer();
+      final think = StringBuffer();
+      for (final p in parts) {
+        if (p is! Map || p['text'] is! String) continue;
+        (p['thought'] == true ? think : text).write(p['text']);
+      }
+      return (text: text.toString(), reasoning: think.toString());
+    case AgentApiFormat.anthropic:
+      final d = frame['delta'];
+      if (d is! Map) return none;
+      return switch (d['type']) {
+        'text_delta' => (
+          text: d['text'] is String ? d['text'] as String : '',
+          reasoning: '',
+        ),
+        'thinking_delta' => (
+          text: '',
+          reasoning: d['thinking'] is String ? d['thinking'] as String : '',
+        ),
+        // message_delta(停止原因)这类也带 delta,但不带字
+        _ => none,
+      };
+  }
+}
+
+/// 流到一半的原文 → 气泡里该显示的两块。
+///
+/// 纯函数,每帧拿全量原文重算:`</Think>` 收尾那一刻正文会整段挪位,增量式拼接
+/// 得为这一下单独留一套回退。
+///
+/// 正文到第一个 ```tool_call / ```nai_draw 围栏为止 —— 围栏里是给机器看的 JSON,
+/// 而且收完才解析得了。普通的 ``` 代码块照留(回复里列 tag 会用到)。
+/// `<Think>` 段(含还没收尾的)整段划到思考那边。
+({String body, String think}) directStreamView(String raw) {
+  final think = <String>[];
+  final body = StringBuffer();
+  var pos = 0;
+  for (final m in _thinkOpen.allMatches(raw)) {
+    if (m.start < pos) continue; // 上一段 <Think> 内部的,不重复处理
+    body.write(raw.substring(pos, m.start));
+    final close = _thinkClose.firstMatch(raw.substring(m.end));
+    if (close == null) {
+      think.add(raw.substring(m.end)); // 还没收尾:后面全算思考
+      pos = raw.length;
+      break;
+    }
+    think.add(raw.substring(m.end, m.end + close.start));
+    pos = m.end + close.end;
+  }
+  if (pos < raw.length) body.write(raw.substring(pos));
+  var text = body.toString();
+  final fence = _liveFenceOpen.firstMatch(text);
+  if (fence != null) text = text.substring(0, fence.start);
+  return (
+    body: text.replaceFirst(_liveTail, '').trim(),
+    think: think.join('\n').trim(),
+  );
 }
 
 /// 一次模型调用的请求头与请求体。三家的形状各不相同,抽出来单测 ——
@@ -679,6 +875,9 @@ Future<String> _callModel(
   required String system,
   required List<DirectMsg> msgs,
   required ThinkLevel think,
+
+  /// 开流式。Gemini 不在体里开 —— 它换的是路径,见 [CustomEndpoint.chatStreamUri]。
+  bool stream = false,
 }) {
   final key = e.apiKey.trim();
   return switch (e.format) {
@@ -703,6 +902,7 @@ Future<String> _callModel(
               },
             },
         ],
+        if (stream) 'stream': true,
         ...thinkFields(AgentApiFormat.openai, think),
       },
     ),
@@ -760,6 +960,7 @@ Future<String> _callModel(
               },
             },
         ],
+        if (stream) 'stream': true,
         ...thinkFields(AgentApiFormat.anthropic, think),
       },
     ),

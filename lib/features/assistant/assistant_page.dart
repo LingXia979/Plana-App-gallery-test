@@ -1218,7 +1218,13 @@ class _LiveTurn extends StatelessWidget {
                     child: ToolTrail(tools: state.liveTools, running: true),
                   ),
           ),
-          _PendingBubble(stage: state.stage, since: since, fontSize: fontSize),
+          _PendingBubble(
+            stage: state.stage,
+            since: since,
+            fontSize: fontSize,
+            text: state.liveText,
+            reasoning: state.liveReasoning,
+          ),
         ],
       ),
     );
@@ -1234,11 +1240,16 @@ const _kAiBubbleRadius = BorderRadius.only(
 );
 
 /// 回复还没来时占着它位置的气泡:转圈 + 阶段文案 + 秒数。
+///
+/// 模型开始吐字之后,思考与正文接在下面实时长出来(自填接口那条才有,见
+/// [AgentDelta])。最终那条 AI 气泡长得跟这里一样,所以换过去时不跳版。
 class _PendingBubble extends StatefulWidget {
   const _PendingBubble({
     required this.stage,
     required this.since,
     required this.fontSize,
+    this.text = '',
+    this.reasoning = '',
   });
 
   final String stage;
@@ -1248,12 +1259,21 @@ class _PendingBubble extends StatefulWidget {
 
   final double fontSize;
 
+  /// 正在写的正文。空 = 还没开始吐字,或这条链路不发增量。
+  final String text;
+
+  /// 正在写的思考过程。
+  final String reasoning;
+
   @override
   State<_PendingBubble> createState() => _PendingBubbleState();
 }
 
 class _PendingBubbleState extends State<_PendingBubble> {
   late final Timer _tick;
+
+  /// 思考那块收起来了。默认摊开 —— 开了思考的模型多半就是想看它在想什么。
+  bool _thinkFolded = false;
 
   @override
   void initState() {
@@ -1285,46 +1305,118 @@ class _PendingBubbleState extends State<_PendingBubble> {
       height: 1.6,
       color: scheme.onSurfaceVariant,
     );
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 11, 16, 11),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        borderRadius: _kAiBubbleRadius,
+    final live = widget.text.isNotEmpty || widget.reasoning.isNotEmpty;
+    return ConstrainedBox(
+      // 吐字之后按 AI 气泡同一个上限断行;还没吐字时那行状态文案自己多宽算多宽
+      constraints: BoxConstraints(
+        maxWidth: live ? MediaQuery.sizeOf(context).width * .84 : double.infinity,
       ),
-      child: Row(
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 11, 16, 11),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerLow,
+          borderRadius: _kAiBubbleRadius,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox.square(
+                  dimension: widget.fontSize + 3,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.2,
+                    color: scheme.primary,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // 「正在想」「正在查资料」来回换时淡入淡出;左对齐叠放,长短不同的两句不会横着晃
+                AnimatedSwitcher(
+                  duration: Motion.fast,
+                  layoutBuilder: (current, previous) => Stack(
+                    alignment: Alignment.centerLeft,
+                    children: [...previous, ?current],
+                  ),
+                  child: Text(
+                    widget.stage.isEmpty ? '正在想…' : widget.stage,
+                    key: ValueKey(widget.stage),
+                    style: style,
+                  ),
+                ),
+                if (secs != null) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    '$secs 秒',
+                    style: style.copyWith(
+                      color: scheme.outline,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            if (widget.reasoning.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _think(scheme),
+            ],
+            if (widget.text.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              // 不套 AnimatedSize:每秒十几帧的增量,补间只会让字一直在抖
+              ReplyBody(widget.text, fontSize: widget.fontSize),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 思考过程:小一号的灰字,限高四行,点一下收起。
+  ///
+  /// 超出限高时只显示最新写出来的那几句 —— `reverse` 的滚动视图天然吸在底,
+  /// 不必为了跟着最新一行去挂控制器。
+  Widget _think(ColorScheme scheme) {
+    final style = context.texts.labelSmall!.copyWith(
+      fontSize: widget.fontSize - 2,
+      height: 1.5,
+      color: scheme.outline,
+    );
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _thinkFolded = !_thinkFolded),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox.square(
-            dimension: widget.fontSize + 3,
-            child: CircularProgressIndicator(
-              strokeWidth: 2.2,
-              color: scheme.primary,
-            ),
-          ),
-          const SizedBox(width: 10),
-          // 「正在想」「正在查资料」来回换时淡入淡出;左对齐叠放,长短不同的两句不会横着晃
-          AnimatedSwitcher(
-            duration: Motion.fast,
-            layoutBuilder: (current, previous) => Stack(
-              alignment: Alignment.centerLeft,
-              children: [...previous, ?current],
-            ),
-            child: Text(
-              widget.stage.isEmpty ? '正在想…' : widget.stage,
-              key: ValueKey(widget.stage),
-              style: style,
-            ),
-          ),
-          if (secs != null) ...[
-            const SizedBox(width: 8),
-            Text(
-              '$secs 秒',
-              style: style.copyWith(
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('思考', style: style),
+              Icon(
+                _thinkFolded ? Icons.expand_more : Icons.expand_less,
+                size: widget.fontSize,
                 color: scheme.outline,
-                fontFeatures: const [FontFeature.tabularFigures()],
               ),
-            ),
-          ],
+            ],
+          ),
+          AnimatedSize(
+            duration: Motion.fast,
+            curve: Motion.standard,
+            alignment: Alignment.topLeft,
+            child: _thinkFolded
+                ? const SizedBox(width: double.infinity)
+                : ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: (widget.fontSize - 2) * 1.5 * 4,
+                    ),
+                    child: SingleChildScrollView(
+                      reverse: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      child: Text(widget.reasoning, style: style),
+                    ),
+                  ),
+          ),
         ],
       ),
     );
