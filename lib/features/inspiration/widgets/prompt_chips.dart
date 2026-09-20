@@ -15,13 +15,28 @@ typedef PromptSection = ({String? label, String body});
 ///
 /// 译文与编辑器同一条链路:[parseToks] 解析时先吃共享缓存/离线词库,
 /// 缺的批量丢给 [TagTranslationService](增强补全模式才联网),到货即刷新。
+/// 调用方另有更合适的译名(法典源自带的对照表)时从 [preferredTrans] 垫在最前面。
 class PromptChips extends ConsumerStatefulWidget {
-  const PromptChips({super.key, required this.sections});
+  const PromptChips({
+    super.key,
+    required this.sections,
+    this.preferredTrans,
+    this.preferredTransLoading = false,
+  });
 
   PromptChips.single(String body, {Key? key})
     : this(key: key, sections: [(label: null, body: body)]);
 
   final List<PromptSection> sections;
+
+  /// 先于 app 自有译名链路查的一层(入参是芯片上的名字),查不到才轮到共享
+  /// 缓存 / 离线词库 / 后端。传方法 tear-off:同一对象的 tear-off 彼此 `==`,
+  /// 外层重建不会触发重新分词。
+  final String? Function(String name)? preferredTrans;
+
+  /// [preferredTrans] 那层还在路上:缺译名的芯片先画加载态,也先不问后端 ——
+  /// 表一到多半就有了,别白打一轮 LLM。
+  final bool preferredTransLoading;
 
   @override
   ConsumerState<PromptChips> createState() => _PromptChipsState();
@@ -32,7 +47,8 @@ class _PromptChipsState extends ConsumerState<PromptChips>
   TagTranslationService? _svc;
 
   /// 解析结果缓存:这棵子树可能被外层动画频繁重建,不能每次重新分词。
-  late List<({String? label, List<Tok> toks})> _parsed;
+  /// `trans` 是最终显示的译名([PromptChips.preferredTrans] 优先,否则 `Tok.trans`)。
+  late List<({String? label, List<({Tok tok, String? trans})> toks})> _parsed;
 
   /// 译文加载态的脉动:整片芯片共用一个 ticker,且只在**真有词在等**时才转
   /// (编辑器芯片流同款;没人等还空转 = 白烧一整屏的帧)。
@@ -51,8 +67,11 @@ class _PromptChipsState extends ConsumerState<PromptChips>
   @override
   void didUpdateWidget(covariant PromptChips old) {
     super.didUpdateWidget(old);
-    if (!listEquals(old.sections, widget.sections)) {
-      _parse();
+    final reparse =
+        !listEquals(old.sections, widget.sections) ||
+        old.preferredTrans != widget.preferredTrans;
+    if (reparse) _parse();
+    if (reparse || old.preferredTransLoading != widget.preferredTransLoading) {
       _requestMissing();
     }
   }
@@ -87,23 +106,26 @@ class _PromptChipsState extends ConsumerState<PromptChips>
   }
 
   void _parse() {
+    final pre = widget.preferredTrans;
     _parsed = [
       for (final s in widget.sections)
         (
           label: s.label,
           toks: [
             for (final t in parseToks(s.body))
-              if (t.name.trim().isNotEmpty) t,
+              if (t.name.trim().isNotEmpty)
+                (tok: t, trans: pre?.call(t.name) ?? t.trans),
           ],
         ),
     ];
   }
 
   void _requestMissing() {
+    if (widget.preferredTransLoading) return; // 等那层到了再问剩下的
     _svc?.request([
       for (final sec in _parsed)
-        for (final t in sec.toks)
-          if (t.trans == null) t.name,
+        for (final c in sec.toks)
+          if (c.trans == null) c.tok.name,
     ]);
   }
 
@@ -118,8 +140,10 @@ class _PromptChipsState extends ConsumerState<PromptChips>
       _requestMissing();
     }
     var anyPending = false;
-    bool pendingOf(Tok t) {
-      final p = t.trans == null && svc.isPending(t.name);
+    bool pendingOf(({Tok tok, String? trans}) c) {
+      final p =
+          c.trans == null &&
+          (widget.preferredTransLoading || svc.isPending(c.tok.name));
       anyPending |= p;
       return p;
     }
@@ -145,8 +169,13 @@ class _PromptChipsState extends ConsumerState<PromptChips>
             spacing: 6,
             runSpacing: 6,
             children: [
-              for (final t in _parsed[i].toks)
-                _ReadTagChip(t, pending: pendingOf(t), pulse: _pulse),
+              for (final c in _parsed[i].toks)
+                _ReadTagChip(
+                  c.tok,
+                  trans: c.trans,
+                  pending: pendingOf(c),
+                  pulse: _pulse,
+                ),
             ],
           ),
         ],
@@ -162,9 +191,17 @@ class _PromptChipsState extends ConsumerState<PromptChips>
 /// 译文行**恒占位**(编辑器同款):有没有译文都一样高,异步到货/答不出
 /// 都不跳版。
 class _ReadTagChip extends StatelessWidget {
-  const _ReadTagChip(this.tok, {required this.pending, required this.pulse});
+  const _ReadTagChip(
+    this.tok, {
+    required this.trans,
+    required this.pending,
+    required this.pulse,
+  });
 
   final Tok tok;
+
+  /// 显示的译名(可能来自 [PromptChips.preferredTrans],不一定是 `tok.trans`)。
+  final String? trans;
 
   /// 译文在路上(排队/在问):行占住并画脉动条,到货不跳版。
   final bool pending;
@@ -194,7 +231,7 @@ class _ReadTagChip extends StatelessWidget {
         alpha: .45 + i * .35,
       );
     }
-    final trans = tok.trans;
+    final trans = this.trans;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(

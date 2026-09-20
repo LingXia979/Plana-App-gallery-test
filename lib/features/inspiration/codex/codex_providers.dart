@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'codex_models.dart';
 import 'codex_service.dart';
+import 'codex_tag_zh.dart';
 
 /// 法典接入的 Riverpod 门面:索引/图床/每部数据都是拉一次缓存,
 /// 选中法典在会话内记忆,首次说明/翻面示范各自落一个标记。
@@ -36,6 +37,40 @@ final codexDataProvider = FutureProvider.family<CodexData, String>((
     orElse: () => throw CodexException('未找到法典:$id'),
   );
   return ref.read(codexServiceProvider).fetchCodex(meta);
+});
+
+/// 对照表的缓存戳(见 [codexIndexStamp])。索引出错(含 Riverpod 自动重试中)
+/// 直接给 null:对照表这层跳过,芯片退回 app 自己的译名,不陪着索引转圈。
+Future<String?> _tagZhStamp(Ref ref) async {
+  if (ref.watch(codexIndexProvider).hasError) return null;
+  try {
+    return codexIndexStamp(await ref.watch(codexIndexProvider.future));
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 原站的全站公共对照表(`tag_zh/core.json`)。拉不到 → null。
+final codexTagZhCoreProvider = FutureProvider<TagZhShard?>((ref) async {
+  final stamp = await _tagZhStamp(ref);
+  if (stamp == null) return null;
+  return ref.read(codexServiceProvider).fetchTagZh('core', stamp);
+});
+
+/// 一部法典查译名用的表(core + 该书分片);null = 对照表不可用。
+/// 收藏夹打开单条也走这里:只拉两张译名表,不必把整部法典拉起来。
+final codexTagZhProvider = FutureProvider.family<CodexTagZh?, String>((
+  ref,
+  id,
+) async {
+  final core = await ref.watch(codexTagZhCoreProvider.future);
+  if (core == null) return null;
+  if (!core.shards.contains(id)) return CodexTagZh(core);
+  final stamp = await _tagZhStamp(ref);
+  final shard = stamp == null
+      ? null
+      : await ref.read(codexServiceProvider).fetchTagZh(id, stamp);
+  return CodexTagZh(core, shard);
 });
 
 /// 当前选中的法典 id(会话内记忆;为空时 UI 默认取索引首个非 R18)。

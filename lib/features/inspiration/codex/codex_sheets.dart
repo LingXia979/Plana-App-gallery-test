@@ -554,7 +554,10 @@ class _DetailSheetState extends ConsumerState<_DetailSheet>
                             color: scheme.surfaceContainerHigh,
                             borderRadius: BorderRadius.circular(12),
                           ),
-                          child: PromptChips(sections: _codexPromptSections(e)),
+                          child: Consumer(
+                            builder: (_, ref, _) =>
+                                _codexChips(ref, widget.codex.id, e),
+                          ),
                         ),
                     ],
                   ),
@@ -1334,6 +1337,7 @@ class _CodexHeroImagesState extends ConsumerState<_CodexHeroImages>
   /// 垫毛玻璃底。整段复制仍走底部那枚「复制」—— 芯片不可选字,
   /// 点它就是点卡片,照样翻回去。
   Widget _promptFace() => _PromptFace(
+    codexId: widget.codex.id,
     entry: widget.entry,
     bgUrl: _imgCount == 0
         ? null
@@ -1530,17 +1534,24 @@ class _BlurredBackdropState extends State<_BlurredBackdrop> {
 /// 提示词面:只读芯片流,例图毛玻璃垫底(无图词条素色)。
 /// 装得下就禁止内滚 —— 内层滚动区会把竖向拖动全吃掉,整张弹层跟着卡住。
 /// 芯片高度没法按字预算,改从真实布局读:帧后看 maxScrollExtent。
-class _PromptFace extends StatefulWidget {
-  const _PromptFace({required this.entry, this.bgUrl});
+/// 对照表在这层 watch 而不是交给芯片自己:表到了芯片换字、宽度会变,
+/// 这层跟着重建才会重新量一遍。
+class _PromptFace extends ConsumerStatefulWidget {
+  const _PromptFace({
+    required this.codexId,
+    required this.entry,
+    this.bgUrl,
+  });
 
+  final String codexId;
   final CodexEntry entry;
   final String? bgUrl;
 
   @override
-  State<_PromptFace> createState() => _PromptFaceState();
+  ConsumerState<_PromptFace> createState() => _PromptFaceState();
 }
 
-class _PromptFaceState extends State<_PromptFace> {
+class _PromptFaceState extends ConsumerState<_PromptFace> {
   final _scroll = ScrollController();
   bool _fits = false;
 
@@ -1566,7 +1577,7 @@ class _PromptFaceState extends State<_PromptFace> {
       controller: _scroll,
       padding: const EdgeInsets.all(14),
       physics: _fits ? const NeverScrollableScrollPhysics() : null,
-      child: PromptChips(sections: _codexPromptSections(widget.entry)),
+      child: _codexChips(ref, widget.codexId, widget.entry),
     );
     if (widget.bgUrl == null) {
       return ColoredBox(color: scheme.surfaceContainerHigh, child: content);
@@ -1579,6 +1590,17 @@ class _PromptFaceState extends State<_PromptFace> {
       ],
     );
   }
+}
+
+/// 法典词条的芯片流:译名先查原站的对照表([codexTagZhProvider]),查不到才
+/// 退回 app 自己的词库 / 后端。
+PromptChips _codexChips(WidgetRef ref, String codexId, CodexEntry e) {
+  final zh = ref.watch(codexTagZhProvider(codexId));
+  return PromptChips(
+    sections: _codexPromptSections(e),
+    preferredTrans: zh.value?.lookup,
+    preferredTransLoading: zh.isLoading && !zh.hasError,
+  );
 }
 
 /// 法典词条按 [PromptChips] 的口径分段:与 [CodexEntry.fullText] 一致,

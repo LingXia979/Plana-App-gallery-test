@@ -205,6 +205,10 @@ class _CodexViewState extends ConsumerState<CodexView>
       error: (e, _) =>
           _error('法典加载失败', () => ref.invalidate(codexDataProvider(meta.id))),
       data: (d) {
+        // 词条到手就把这部的中文对照也拉上:点开详情时表多半已就绪,芯片不用
+        // 先出离线词库的译名、再被对照表换一遍字。listen 不 watch —— 表到了
+        // 这层不用重建。
+        ref.listen(codexTagZhProvider(meta.id), (_, _) {});
         final media =
             ref.watch(codexMediaProvider).value ?? CodexMedia.fallback;
         final entries = _filtered(d);
