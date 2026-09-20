@@ -1101,18 +1101,18 @@ void main() {
       expect(pre.plan.tokens, {'__ARTIST_D11__': d11});
     });
 
-    test('这轮没点到的那类用账本补上;账本里记着的画师串都进映射', () {
+    test('这轮没点到的画师串用账本补上,OC 不补;账本里记着的画师串都进映射', () {
       final pre = buildLocalPrequery(
         text: '换个姿势',
         artists: artists,
         ocs: ocs,
         remembered: {
           'artist': {'A1': a1},
-          'oc': {'小小纺': 'silver hair, twin braids'},
+          'oc': {'小小纺': 'silver hair, twin braids'}, // 旧版记下的
         },
       );
       expect(pre.block, contains('A1 → __ARTIST_A1__'));
-      expect(pre.block, contains('[OC 角色]\n小小纺 → silver hair, twin braids'));
+      expect(pre.block, isNot(contains('[OC 角色]')), reason: 'OC 只活在点到它的那一轮');
       expect(pre.thisTurn['artist'], isEmpty, reason: '补上的不算本轮命中');
       final none = buildLocalPrequery(
         text: '用 D11',
@@ -1257,16 +1257,16 @@ void main() {
       );
     });
 
-    test('收尾记账:本轮 ∪ 记着的,出了图才按画面筛', () {
+    test('收尾记账:本轮 ∪ 记着的,出了图才按画面筛;OC 一律不进账', () {
       const remembered = {
         'artist': {'A1': a1, 'Q9': 'artist:gone'},
+        'oc': {'小小纺': 'silver hair, twin braids'}, // 旧版记下的
       };
       const thisTurn = {
         'oc': {'小小纺': 'silver hair, twin braids'},
       };
       expect(mergeLedger(remembered, thisTurn, null), {
         'artist': {'A1': a1, 'Q9': 'artist:gone'},
-        'oc': {'小小纺': 'silver hair, twin braids'},
       });
       expect(
         mergeLedger(remembered, thisTurn, {
@@ -1277,7 +1277,6 @@ void main() {
         }),
         {
           'artist': {'A1': a1},
-          'oc': {'小小纺': 'silver hair, twin braids'},
         },
       );
     });
@@ -1431,7 +1430,6 @@ void main() {
       expect(done.replyText, '用 D11 和 B7 画好了');
       expect(done.resources, {
         'artist': {'D11': d11},
-        'oc': {'小小纺': 'silver hair, twin braids'},
       });
     });
 

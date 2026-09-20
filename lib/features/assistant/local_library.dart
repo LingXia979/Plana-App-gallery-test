@@ -314,7 +314,7 @@ class LocalPrequery {
   /// 附在用户消息后面的资料块:画师串是占位符,OC 是完整 tag 组,角色候选是服务端给的。
   final String block;
 
-  /// 本轮命中的(完整内容),收尾记账用。
+  /// 本轮命中的(完整内容)。收尾记账只收里面的画师串(见 [mergeLedger])。
   final Map<String, Map<String, String>> thisTurn;
 
   final ArtistPlan plan;
@@ -322,9 +322,9 @@ class LocalPrequery {
 
 /// 拼这一轮的资料块。
 ///
-/// 本轮没点到的那类,把账本里记着的补上(预匹配逐条消息做,用户这轮没再提「A1」块就不出现,
-/// 出处断在那儿)。[useLibrary] 为 false(资料库范围「不使用」)时不匹配也不补,
-/// 但记着的画师串照样进映射 —— 历史里的完整串还得折回占位符。
+/// 本轮没点到画师串,把账本里记着的补上(预匹配逐条消息做,用户这轮没再提「A1」块就不出现,
+/// 出处断在那儿)。OC 不记账,只出本轮点到的。[useLibrary] 为 false(资料库范围「不使用」)
+/// 时不匹配也不补,但记着的画师串照样进映射 —— 历史里的完整串还得折回占位符。
 ///
 /// [publicArtists] / [publicOcs] 是服务端公共库命中的,排在本地的后面、同名以本地为准;
 /// [roleBlock] 是服务端给的 [角色候选] 块,原样接在最后。
@@ -362,9 +362,6 @@ LocalPrequery buildLocalPrequery({
   final artistEntries = artistHits.isEmpty && useLibrary
       ? remembered['artist'] ?? const <String, String>{}
       : artistHits;
-  final ocEntries = ocHits.isEmpty && useLibrary
-      ? remembered['oc'] ?? const <String, String>{}
-      : ocHits;
 
   final plan = ArtistPlan();
   final artistLines = [
@@ -376,7 +373,7 @@ LocalPrequery buildLocalPrequery({
     if (e.key.isNotEmpty && e.value.isNotEmpty) plan.add(e.key, e.value);
   }
   final ocLines = [
-    for (final e in ocEntries.entries)
+    for (final e in ocHits.entries)
       if (e.key.isNotEmpty && e.value.isNotEmpty) '${e.key} → ${e.value}',
   ];
   return LocalPrequery(
@@ -663,7 +660,9 @@ Map<String, Map<String, String>> mergeLedger(
   Map<String, dynamic>? spec,
 ) {
   final out = <String, Map<String, String>>{};
-  for (final kind in const ['artist', 'oc']) {
+  // 只记画师串(服务端 RESOURCE_KINDS)。OC 2026-09-19 起不记账,只活在点到它的那一轮;
+  // 旧账里的 oc 到这儿就丢。
+  for (final kind in const ['artist']) {
     final slot = {...?remembered[kind], ...?thisTurn[kind]};
     if (spec != null) slot.removeWhere((_, v) => !resourceStillInUse(v, spec));
     if (slot.isNotEmpty) out[kind] = slot;

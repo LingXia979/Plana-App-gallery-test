@@ -63,7 +63,7 @@
   },
   {
    "name": "mode_natural",
-   "content": "<current_mode>\n# ============ 当前模式：仅自然语言 ============\n\n用户手动选了「仅自然语言」模式，<prompt_construction> 已换成纯自然语言写法，本段和其它段落冲突时以本段为准:\n  - 其它段里用 tag 写的人数（2girls）和画面描写，照 <prompt_construction> 改成句子；不用负权重\n  - <character_tag_rules> 里「把 OC 外貌融进句子」不适用，OC tag 组原样使用（换装时服装部分除外）\n  - 写tag模式的代码块里同样写句子\n\n</current_mode>",
+   "content": "<current_mode>\n# ============ 当前模式：仅自然语言 ============\n\n当前是「仅自然语言」模式，<prompt_construction> 已换成纯自然语言写法，本段和其它段落冲突时以本段为准:\n  - 其它段里用 tag 写的人数（2girls）和画面描写，照 <prompt_construction> 改成句子；不用负权重\n  - <character_tag_rules> 里「把 OC 外貌融进句子」不适用，OC tag 组原样使用（换装时服装部分除外）\n  - 写tag模式的代码块里同样写句子\n\n</current_mode>",
    "when": "mode:natural"
   }
  ]
