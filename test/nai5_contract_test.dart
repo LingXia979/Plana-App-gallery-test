@@ -401,4 +401,38 @@ void main() {
       expect(positionChipLabel(null, grid: true), 'AUTO');
     });
   });
+
+  // NAI 要求 v4_prompt / v4_negative_prompt 两份 char_captions 等长,不等直接 400
+  // 「V4 positive and negative character prompts must have the same length.」。
+  // 早先负向只收写了负向的角色 —— 只要有一个角色没写负向就出不了图。
+  test('角色负向与正向等长:没写负向的发空串', () {
+    final body = buildNaiPayload(
+      _state('NAI 4.5 Full').copyWith(
+        characters: const [
+          CharacterPrompt(id: 'a', name: 'a', positive: 'x', position: 'B3'),
+          CharacterPrompt(
+            id: 'b',
+            name: 'b',
+            positive: 'y',
+            negative: 'bad hands',
+            position: 'D3',
+          ),
+        ],
+      ),
+      presetId: 'heavy',
+    ).body;
+    List<dynamic> caps(String key) =>
+        (((body['parameters'] as Map)[key] as Map)['caption']
+                as Map)['char_captions']
+            as List;
+    final neg = caps('v4_negative_prompt');
+    expect(neg.length, caps('v4_prompt').length);
+    expect(neg[0], {
+      'char_caption': '',
+      'centers': [
+        {'x': 0.3, 'y': 0.5},
+      ],
+    });
+    expect((neg[1] as Map)['char_caption'], 'bad hands');
+  });
 }

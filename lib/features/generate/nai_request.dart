@@ -274,14 +274,15 @@ Map<String, double> _center(String? pos) {
     params['v4_negative_prompt'] = {
       'caption': {
         'base_caption': s.negativePrompt,
-        // 仅对负向非空的角色加(与 web 一致)
+        // 每个角色一条,没写负向的发空串 —— 必须与正向等长(同官方)。
+        // 早先只收负向非空的,NAI 现在会直接 400:「V4 positive and negative
+        // character prompts must have the same length.」
         'char_captions': [
           for (var i = 0; i < chars.length; i++)
-            if (chars[i].negative.trim().isNotEmpty)
-              {
-                'char_caption': chars[i].negative.trim(),
-                'centers': [sentCenters[i]],
-              },
+            {
+              'char_caption': chars[i].negative.trim(),
+              'centers': [sentCenters[i]],
+            },
         ],
       },
       'legacy_uc': false,

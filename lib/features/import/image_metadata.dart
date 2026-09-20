@@ -332,9 +332,9 @@ ImageMetadata? _parseNai(Map<String, dynamic> data) {
       negative = comment['uc'].toString();
     }
 
-    // 角色负向按坐标索引:v4_negative_prompt 那份**只收负向非空的那几个**,
-    // 下标跟正向对不上(正向有 3 个、只有第 2 个写了负向时,那边只有 1 条),
-    // 只能按坐标认人。
+    // 角色负向按坐标索引:老版本本 app / web 出的图,v4_negative_prompt 那份
+    // **只收负向非空的那几个**,下标跟正向对不上(正向有 3 个、只有第 2 个写了
+    // 负向时,那边只有 1 条),只能按坐标认人。官方与现在的本 app 是逐角色等长。
     final negByCenter = <String, String>{};
     if (v4Neg is Map && v4Neg['caption'] is Map) {
       final nl = (v4Neg['caption'] as Map)['char_captions'];
