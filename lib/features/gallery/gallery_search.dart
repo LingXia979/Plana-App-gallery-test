@@ -41,9 +41,12 @@ List<String> searchTerms(String query) => [
 bool searchMatch(String normalizedText, List<String> terms) =>
     terms.every(normalizedText.contains);
 
-/// 检索文本的取材口径:正向 + 全部角色正向(含禁用的 —— 它们承载过
-/// 构图意图,搜得到比搜不到有用;负向不进 —— 人人都有 lowres/bad hands,
-/// 搜什么都命中,纯噪音)。
+/// 检索文本的取材口径:正向 + **启用的**角色正向。
+///
+/// 禁用的角色卡不进:它没发出去,图里没有它。早先是收的(理由是「承载过构图
+/// 意图,搜得到比搜不到有用」),结果搜得到图里没画的东西,按角色分组也跟着
+/// 归错 —— 这份文本同时是分组的输入。负向同样不进:人人都有 lowres/bad hands,
+/// 搜什么都命中,纯噪音。
 String _joinedText(String prompt, Iterable<String> charPositives) =>
     normalizeSearchText(
       [prompt, ...charPositives].where((t) => t.trim().isNotEmpty).join(', '),
@@ -52,7 +55,10 @@ String _joinedText(String prompt, Iterable<String> charPositives) =>
 /// 内存里的输入快照 → 元数据(addResult 同帧,input 一定在)。
 GallerySearchMeta metaOfInput(GenerateState s) => (
   model: s.params.model,
-  text: _joinedText(s.prompt, [for (final c in s.characters) c.positive]),
+  text: _joinedText(s.prompt, [
+    for (final c in s.characters)
+      if (c.enabled) c.positive,
+  ]),
 );
 
 /// 快照原始 JSON(`inputs/<id>.json` 的 `{v, refs, state}`)→ 元数据。
@@ -68,7 +74,9 @@ GallerySearchMeta? metaOfSnapshotJson(Map<String, dynamic> j) {
     text: _joinedText(st['prompt'] is String ? st['prompt'] as String : '', [
       if (st['characters'] is List)
         for (final c in st['characters'] as List)
-          if (c is Map && c['positive'] is String) c['positive'] as String,
+          // 缺 enabled 键按启用算:state_codec 解码时默认就是 true
+          if (c is Map && c['enabled'] != false && c['positive'] is String)
+            c['positive'] as String,
     ]),
   );
 }

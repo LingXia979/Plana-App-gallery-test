@@ -354,14 +354,23 @@ class GalleryStore {
 
   File get _searchFile => File('${_root.path}/search.json');
 
-  /// 检索索引读入;空/坏 → 空表(回填会重扫快照补齐)。
+  /// 检索索引的版本。取材口径一变就得抬 —— 旧版里的文本是按旧口径抽的,留着就是
+  /// 带着错答案不走;读到版本不对直接当空表,回填会按新口径把整库重扫一遍。
+  ///
+  ///   1 → 2:禁用的角色卡不再进索引(旧版把它们也收了,搜得到图里没画的东西,
+  ///          按角色分组也跟着归错)。
+  static const _searchVersion = 2;
+
+  /// 检索索引读入;空/坏/**版本不对** → 空表(回填会重扫快照补齐)。
   /// 值是结构化 record,与 gallery_search 的 GallerySearchMeta 结构同型
   /// (record 按结构判型,这里不 import 上层 feature 文件,避免环)。
   Future<Map<String, ({String model, String text})>> readSearchIndex() async {
     try {
       if (!await _searchFile.exists()) return const {};
       final j = jsonDecode(await _searchFile.readAsString());
-      if (j is! Map || j['items'] is! Map) return const {};
+      if (j is! Map || j['v'] != _searchVersion || j['items'] is! Map) {
+        return const {};
+      }
       return {
         for (final e in (j['items'] as Map).entries)
           if (e.key is String &&
@@ -392,7 +401,7 @@ class GalleryStore {
         await writeStringAtomic(
           _searchFile,
           jsonEncode({
-            'v': 1,
+            'v': _searchVersion,
             'items': {
               for (final e in m.entries)
                 e.key: {'m': e.value.model, 't': e.value.text},

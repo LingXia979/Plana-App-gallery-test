@@ -1,7 +1,9 @@
-// 图库展开页的时间分组/时刻徽标 + 检索索引的归一化/抽取。
+// 图库展开页的时间分组/时刻徽标 + 检索索引的归一化/抽取 + 入库快照的取舍。
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plana_app/features/gallery/gallery_dates.dart';
 import 'package:plana_app/features/gallery/gallery_search.dart';
+import 'package:plana_app/features/gallery/gallery_state.dart';
+import 'package:plana_app/features/generate/models.dart';
 
 void main() {
   group('时间分组', () {
@@ -93,6 +95,61 @@ void main() {
     test('state 不是 map → null', () {
       expect(metaOfSnapshotJson({'state': 'oops'}), isNull);
       expect(metaOfSnapshotJson(const {}), isNull);
+    });
+
+    // 禁用的角色卡没发出去,图里没有它 —— 进了索引就会搜到没画的东西、
+    // 按角色分组归错。升级前的老快照盘上还带着它们,抽取这一道必须兜住。
+    test('老快照里禁用的角色卡不进索引;缺 enabled 键按启用算', () {
+      final m = metaOfSnapshotJson({
+        'state': {
+          'prompt': '1girl',
+          'characters': [
+            {'positive': 'red eyes', 'enabled': true},
+            {'positive': 'cat ears', 'enabled': false},
+            {'positive': 'halo'}, // 老存档没这个键
+          ],
+        },
+      });
+      expect(m!.text, '1girl, red eyes, halo');
+    });
+
+    test('内存快照同样只收启用的', () {
+      final s = GenerateState.initial().copyWith(
+        prompt: '1girl',
+        characters: const [
+          CharacterPrompt(id: 'a', name: '小夜', positive: 'red eyes'),
+          CharacterPrompt(
+            id: 'b',
+            name: '角色 2',
+            positive: 'cat ears',
+            enabled: false,
+          ),
+        ],
+      );
+      expect(metaOfInput(s).text, '1girl, red eyes');
+    });
+  });
+
+  group('入库快照', () {
+    const on = CharacterPrompt(id: 'a', name: '小夜', positive: 'red eyes');
+    const off = CharacterPrompt(
+      id: 'b',
+      name: '角色 7',
+      positive: 'cat ears',
+      enabled: false,
+    );
+
+    test('禁用的角色卡不入快照,启用的原样保留', () {
+      final s = GenerateState.initial().copyWith(characters: const [on, off]);
+      final snap = gallerySnapshotOf(s);
+      expect(snap.characters.map((c) => c.id), ['a']);
+      expect(snap.characters.single.name, '小夜');
+      expect(snap.prompt, s.prompt, reason: '只动角色卡,别的一概不碰');
+    });
+
+    test('全都启用时不复制,原对象直接用', () {
+      final s = GenerateState.initial().copyWith(characters: const [on]);
+      expect(identical(gallerySnapshotOf(s), s), isTrue);
     });
   });
 }

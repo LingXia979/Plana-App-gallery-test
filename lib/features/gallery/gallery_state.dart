@@ -36,6 +36,28 @@ final galleryZoomedProvider = NotifierProvider<GalleryZoomedNotifier, bool>(
 // 画布跟随哪条任务已经由 GenPool.selectedId 说了算,一个布尔值表达不了
 // 「跟着第几条」,两份状态并存只会打架。
 
+/// 入库的参数快照:**只留启用的角色卡**。
+///
+/// 快照记的是「这张图是怎么出来的」,而禁用的卡根本没发出去(见 nai_request 的
+/// `c.enabled` 过滤)。留着它们只有坏处:检索索引会把它们的标签当成这张图的,
+/// 搜得到没画的东西,按角色分组还会归进没画的角色 —— 切模型时超出槽位的卡会被
+/// 自动停用(见 generate_state 的 `_capEnabled`),所以这不是偶发。
+///
+/// 丢掉也不损失什么,快照的用处逐个核过:重新生成 / 重绘放大是直接拿快照出图
+/// (本来就只发启用的);放大 / 重绘只是把快照带给新图;长按「导入」读的是 PNG
+/// 里嵌的元数据,不读快照。
+///
+/// 升级前的老快照盘上还带着禁用卡,检索那边按 `enabled` 再筛一道兜住。
+GenerateState gallerySnapshotOf(GenerateState s) =>
+    s.characters.every((c) => c.enabled)
+    ? s
+    : s.copyWith(
+        characters: [
+          for (final c in s.characters)
+            if (c.enabled) c,
+        ],
+      );
+
 class GalleryZoomedNotifier extends Notifier<bool> {
   @override
   bool build() => false;
@@ -144,6 +166,7 @@ class GalleryNotifier extends Notifier<GalleryState> {
     /// 后台某一条出完就把用户正看的图换掉,是并行最容易踩的坑。
     bool select = true,
   }) {
+    final snap = input == null ? null : gallerySnapshotOf(input);
     final r = ResultImage(
       id: 'gen${_seq++}',
       width: width,
@@ -154,11 +177,11 @@ class GalleryNotifier extends Notifier<GalleryState> {
       batchIndex: batchIndex,
       inpaintFrom: inpaintFrom,
       bytes: bytes,
-      input: input,
+      input: snap,
     );
     // 检索索引同帧写入(input 在内存,零 IO)
-    if (input != null) {
-      ref.read(gallerySearchProvider.notifier).put(r.id, input);
+    if (snap != null) {
+      ref.read(gallerySearchProvider.notifier).put(r.id, snap);
     }
     var list = [r, ...state.results];
     if (list.length > _keepBytesFor) {
