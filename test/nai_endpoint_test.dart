@@ -10,6 +10,8 @@ import 'package:msgpack_dart/msgpack_dart.dart' as msgpack;
 import 'package:plana_app/core/net/gen_abort.dart';
 import 'package:plana_app/core/net/nai_client.dart';
 import 'package:plana_app/core/net/nai_endpoint.dart';
+import 'package:plana_app/core/net/nai_proxy.dart';
+import 'package:plana_app/core/store/app_stores.dart';
 
 /// 一帧流式消息:4 字节大端长度 + msgpack。
 List<int> _frame(Map<String, dynamic> msg) {
@@ -33,6 +35,45 @@ void main() {
     expect(normalizeNaiBase('$kNaiOfficialBase/'), '');
     expect(naiBaseOf(''), kNaiOfficialBase);
     expect(naiBaseOf('http://127.0.0.1:9'), 'http://127.0.0.1:9');
+  });
+
+  test('代理只顶替官方基址,第三方地址照旧', () {
+    expect(naiBaseOf('', proxy: true), kNaiProxyBase);
+    // 不带 /image 前缀时 Worker 转去 api 子域,登录会打错地方
+    expect(kNaiProxyBase, endsWith('/image'));
+    expect(naiBaseOf('http://127.0.0.1:9', proxy: true), 'http://127.0.0.1:9');
+  });
+
+  test('拨代理开关:官方客户端换线路,第三方的不动', () {
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    const third = 'http://127.0.0.1:9';
+    final thirdClient = c.read(naiClientProvider(third));
+    expect(c.read(naiClientProvider('')).host, kNaiOfficialBase);
+
+    c.read(naiProxyProvider.notifier).set(true);
+    expect(c.read(naiClientProvider('')).host, kNaiProxyBase);
+    expect(c.read(naiClientProvider(third)), same(thirdClient));
+    expect(thirdClient.host, third);
+  });
+
+  test('代理开关落盘:重启读回来,关掉删键', () {
+    final stores = AppStores.ephemeral();
+    ProviderContainer boot() {
+      final c = ProviderContainer(
+        overrides: [appStoresProvider.overrideWithValue(stores)],
+      );
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    final c = boot();
+    expect(c.read(naiProxyProvider), isFalse);
+    c.read(naiProxyProvider.notifier).set(true);
+    expect(boot().read(naiProxyProvider), isTrue);
+    c.read(naiProxyProvider.notifier).set(false);
+    expect(stores.prefs.get('nai_proxy'), isNull);
+    expect(boot().read(naiProxyProvider), isFalse);
   });
 
   test('接口地址形态校验:要协议要主机,不收查询串', () {

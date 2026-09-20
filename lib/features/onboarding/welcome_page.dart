@@ -11,6 +11,7 @@ import '../../core/auth/token_store.dart';
 import '../../core/live_progress/live_progress.dart';
 import '../../core/net/nai_client.dart';
 import '../../core/net/nai_endpoint.dart';
+import '../../core/net/nai_proxy.dart';
 import '../../core/store/gen_settings.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/theme_settings.dart';
@@ -591,6 +592,14 @@ class _AccessStepState extends ConsumerState<_AccessStep>
 
   void _onUrl() => setState(() => _urlError = null);
 
+  /// 代理开关(与「账号与接入」里那个是同一个)。刚才没查通的,换条线路再查
+  /// 一次;已经查通的不重查 —— 令牌好坏跟走哪条线路无关。
+  void _setProxy(bool on) {
+    ref.read(naiProxyProvider.notifier).set(on);
+    _probe.input(_tokenCtrl.text);
+    Haptics.selection();
+  }
+
   /// 官方 ↔ 第三方。切过去先把探测结果清掉 —— 那是刚才查官方留下的,
   /// 挂在第三方那一栏下面就是张冠李戴。
   void _switchThird(bool third) {
@@ -745,17 +754,56 @@ class _AccessStepState extends ConsumerState<_AccessStep>
                   ),
                 ),
                 // 直连是本机直打 NovelAI:网络到不了官网,令牌填对了也一样
-                // 生成不了(那条路该走下一张卡的 Bot,或换第三方接口)。
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(0, 9, 0, 9),
-                  child: Text(
-                    _third
-                        ? '兼容 NovelAI 接口的中转站或自建反代,地址跟这把 key 一起存'
-                        : '请确保你的网络可以访问 NovelAI 官网',
-                    style: context.texts.labelSmall!.copyWith(
-                      color: scheme.outline,
-                    ),
-                  ),
+                // 生成不了 —— 官方那一路就地给代理开关。第三方那一路打的是它
+                // 自己那台,代理管不着,只留一句说明。
+                AnimatedSize(
+                  duration: Motion.fast,
+                  curve: Motion.standard,
+                  alignment: Alignment.topCenter,
+                  child: _third
+                      ? Padding(
+                          padding: const EdgeInsets.fromLTRB(0, 9, 0, 9),
+                          child: Text(
+                            '兼容 NovelAI 接口的中转站或自建反代,地址跟这把 key 一起存',
+                            style: context.texts.labelSmall!.copyWith(
+                              color: scheme.outline,
+                            ),
+                          ),
+                        )
+                      : Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '代理访问 NovelAI',
+                                      style: context.texts.labelMedium!
+                                          .copyWith(
+                                            color: scheme.onSurfaceVariant,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      kNaiProxyHint,
+                                      style: context.texts.labelSmall!.copyWith(
+                                        color: scheme.outline,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Switch(
+                                value: ref.watch(naiProxyProvider),
+                                onChanged: _setProxy,
+                                materialTapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                              ),
+                            ],
+                          ),
+                        ),
                 ),
                 // 两种表单高矮不同,换分段时补成过渡,不然整张卡会啪地跳一下。
                 AnimatedSize(

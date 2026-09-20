@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/auth/nai_credential_login.dart';
 import '../../../core/auth/token_store.dart';
 import '../../../core/net/nai_client.dart';
+import '../../../core/net/nai_proxy.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/util/haptics.dart';
 
@@ -67,10 +68,11 @@ class _CredentialLoginSheetState extends ConsumerState<_CredentialLoginSheet> {
     try {
       // 密码只进派生,不落盘;留下的是 accessKey(续期凭证)+ JWT。
       // 内部按官网同款顺序尝试多种邮箱大小写形态。
-      // 邮箱登录是官方那条流程(第三方中转不发 NAI 账号),固定打官方。
+      // 邮箱登录是官方那条流程(第三方中转不发 NAI 账号),固定打官方(开了代理经代理)。
       final (jwt, key) = await naiCredentialLoginFlow(
         _email.text,
         _password.text,
+        proxy: ref.read(naiProxyProvider),
       );
       // 续期凭证跟着这把 Key 一起存 —— 日后续期只会换它自己那把的令牌。
       await ref.read(tokenProvider.notifier).save(jwt, accessKey: key);

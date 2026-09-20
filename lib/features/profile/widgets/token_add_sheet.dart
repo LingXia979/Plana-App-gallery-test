@@ -8,6 +8,7 @@ import '../../../core/auth/token_probe.dart';
 import '../../../core/auth/token_store.dart';
 import '../../../core/net/nai_client.dart';
 import '../../../core/net/nai_endpoint.dart';
+import '../../../core/net/nai_proxy.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/util/haptics.dart';
 import 'token_status.dart';
@@ -143,10 +144,11 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
       _error = null;
     });
     try {
-      // 邮箱登录是官方那条流程(中转站不发 NAI 账号),固定打官方。
+      // 邮箱登录是官方那条流程(中转站不发 NAI 账号),固定打官方(开了代理经代理)。
       final (jwt, key) = await naiCredentialLoginFlow(
         _email.text,
         _password.text,
+        proxy: ref.read(naiProxyProvider),
       );
       await ref.read(tokenProvider.notifier).save(jwt, accessKey: key);
       if (!mounted) return;
@@ -324,8 +326,11 @@ class _TokenAddSheetState extends ConsumerState<_TokenAddSheet> {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       Text(
-        'NovelAI 网站 → User Settings → Account → Get Persistent API Token。'
-        '直连生成需要你的网络可以访问 NovelAI 官网。',
+        [
+          'NovelAI 网站 → User Settings → Account → Get Persistent API Token。',
+          // 开了代理就不必自己够得着官网
+          if (!ref.watch(naiProxyProvider)) '直连生成需要你的网络可以访问 NovelAI 官网。',
+        ].join(),
         style: context.texts.labelSmall!.copyWith(color: scheme.outline),
       ),
       const SizedBox(height: 12),

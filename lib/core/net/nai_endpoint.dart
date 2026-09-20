@@ -10,12 +10,27 @@ library;
 /// (2026-07-04 起,旧 api.novelai.net 回 400 "Please refresh NovelAI.net")。
 const kNaiOfficialBase = 'https://image.novelai.net';
 
+/// 官方基址的代理替身:Plana 的 Cloudflare Worker,网页端 API 模式走的同一台。
+/// 开关见 `naiProxyProvider`。
+///
+/// Worker 按路径前缀分流,`/image/*` 去掉前缀原样转给 image.novelai.net ——
+/// 所以它能整个顶替 [kNaiOfficialBase],`/ai/*`、`/user/*` 的拼法一个字不用改。
+///
+/// **`/image` 不能省**:不带前缀时 Worker 转的是 api 子域(只有
+/// `/user/subscription` 被单独指去了 image),`/user/login` 就打错了地方。
+/// 2026-09-16 用空体 POST 对拍过:带前缀回 image 那套校验文案,不带回 api 那套。
+const kNaiProxyBase = 'https://novelai.sora214.top/image';
+
 /// 旧的**全局**接口地址设置键。只剩迁移用:首次读取令牌列表时盖到还没有地址
 /// 的 Key 上,盖完清掉(见 `NaiKeysNotifier._adoptLegacyEndpoint`)。
 const kLegacyNaiEndpointKey = 'nai_endpoint_base';
 
-/// 实际生效的基址:自定义为空就回落官方。
-String naiBaseOf(String custom) => custom.isEmpty ? kNaiOfficialBase : custom;
+/// 实际生效的基址:自定义地址优先;为空(官方)时开了 [proxy] 就换代理。
+///
+/// [proxy] 只管官方那几把:第三方的 key 只在它自己那台机器上有效,Worker 却只会
+/// 转给官方,绕过去等于换了一台不认这把 key 的机器。
+String naiBaseOf(String custom, {bool proxy = false}) =>
+    custom.isNotEmpty ? custom : (proxy ? kNaiProxyBase : kNaiOfficialBase);
 
 /// 基址归一:trim + 去尾斜杠;填成官方地址本身归一到空串 —— 不然界面上会多出
 /// 一条「第三方」而它跟官方一模一样。

@@ -11,6 +11,7 @@ import 'package:msgpack_dart/msgpack_dart.dart' as msgpack;
 
 import 'gen_abort.dart';
 import 'nai_endpoint.dart';
+import 'nai_proxy.dart';
 
 /// 流式生成的一帧:step 非空=中间预览,isFinal=终图。
 typedef NaiFrame = ({int? step, bool isFinal, Uint8List bytes});
@@ -153,8 +154,12 @@ extension NaiUsageX on NaiUsage {
 /// key 可以同时存着,各打各的机器 —— 没有「当前接口地址」这种全局状态可依赖,
 /// 调用方拿的是哪把 Key 就传哪个地址。换地址等于换 family 键,`watch` 它的
 /// 账户查询会自己重来一遍。
+///
+/// 唯一的全局量是代理开关([naiProxyProvider]),只作用于官方那份:开关一拨,
+/// 官方客户端重建,账户查询同样自己重来;第三方的不看它,也就不随它重建。
 final naiClientProvider = Provider.family<NaiClient, String>(
-  (ref, base) => NaiClient(base: base),
+  (ref, base) =>
+      NaiClient(base: base, proxy: base.isEmpty && ref.watch(naiProxyProvider)),
 );
 
 class NaiException implements Exception {
@@ -170,11 +175,16 @@ class NaiException implements Exception {
 const kNaiV5UpscaleModel = 'nai-diffusion-5-curated';
 
 class NaiClient {
-  /// [base] 为空 = 官方 [kNaiOfficialBase];非空则整条直连线改打它。
-  NaiClient({String base = ''}) : _host = naiBaseOf(base);
+  /// [base] 为空 = 官方 [kNaiOfficialBase],此时开了 [proxy] 改经 [kNaiProxyBase];
+  /// 非空则整条直连线改打它,[proxy] 不起作用。
+  NaiClient({String base = '', bool proxy = false})
+    : _host = naiBaseOf(base, proxy: proxy);
 
   /// `/ai/*` 与 `/user/subscription` 的基址(已带协议、无尾斜杠)。
   final String _host;
+
+  /// 仅供测试观察。
+  String get host => _host;
 
   /// 报错文案里的主机名(自定义地址时不能再张口就说「novelai.net 被拦了」)。
   String get _hostName => Uri.tryParse(_host)?.host ?? _host;

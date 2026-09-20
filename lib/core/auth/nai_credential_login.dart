@@ -4,7 +4,8 @@
 /// 由 test/core/auth 的 Python argon2-cffi 参考向量钉死,改动必先过测试。
 ///
 /// `/user/*` 与 `/ai/*` 同基址,见 [kNaiOfficialBase];第三方那把跟着它自己的地址走
-/// —— 官方站连不上的人,登录和续期同样连不上。
+/// —— 官方站连不上的人,登录和续期同样连不上,所以代理开关([naiProxyProvider])
+/// 也照管这两条。
 library;
 
 import 'dart:async';
@@ -17,6 +18,7 @@ import 'package:http/http.dart' as http;
 
 import '../net/nai_client.dart';
 import '../net/nai_endpoint.dart';
+import '../net/nai_proxy.dart';
 import 'nai_keys.dart';
 
 /// 派生 access key(纯计算,Argon2id 约几百毫秒,UI 侧用 [deriveNaiAccessKeyOffMain])。
@@ -55,12 +57,17 @@ Future<String> deriveNaiAccessKeyOffMain(String email, String password) =>
 /// 401 = key 不对,对用户而言就是邮箱或密码错了。
 ///
 /// [base] 空 = 官方,见 [kNaiOfficialBase];非空时跟着那把 Key 的地址走。
-Future<String> naiLoginWithKey(String accessKey, {String base = ''}) async {
+/// [proxy] 同 [naiBaseOf]:只对官方生效。
+Future<String> naiLoginWithKey(
+  String accessKey, {
+  String base = '',
+  bool proxy = false,
+}) async {
   final http.Response resp;
   try {
     resp = await http
         .post(
-          Uri.parse('${naiBaseOf(base)}/user/login'),
+          Uri.parse('${naiBaseOf(base, proxy: proxy)}/user/login'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'key': accessKey}),
         )
@@ -111,12 +118,13 @@ Future<(String, String)> naiCredentialLoginFlow(
   String rawEmail,
   String password, {
   String base = '',
+  bool proxy = false,
 }) async {
   NaiException? denied;
   for (final email in naiEmailForms(rawEmail)) {
     final key = await deriveNaiAccessKeyOffMain(email, password);
     try {
-      return (await naiLoginWithKey(key, base: base), key);
+      return (await naiLoginWithKey(key, base: base, proxy: proxy), key);
     } on NaiException catch (e) {
       if (e.status != 401) rethrow;
       denied = e;
@@ -156,6 +164,7 @@ final naiTokenAutoRefreshProvider = FutureProvider<void>((ref) async {
   try {
     final keys = await ref.read(naiKeysStoreProvider.future);
     final store = ref.read(naiKeysStoreProvider.notifier);
+    final proxy = ref.read(naiProxyProvider);
     // 逐把各续各的:每把 Key 属于不同账号,凭证也各是各的,打的机器也可能
     // 各是各的。一把失败不影响别把,所以 try 包在循环**里面**。
     for (final k in keys) {
@@ -170,7 +179,7 @@ final naiTokenAutoRefreshProvider = FutureProvider<void>((ref) async {
       try {
         await store.replaceToken(
           k.id,
-          await naiLoginWithKey(accessKey, base: k.endpoint),
+          await naiLoginWithKey(accessKey, base: k.endpoint, proxy: proxy),
         );
       } catch (_) {
         // 这把没续上,下次启动再试;继续看下一把。
