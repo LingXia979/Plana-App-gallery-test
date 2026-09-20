@@ -367,11 +367,21 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
             !running &&
             at == st.msgs.length - 1 &&
             ask?.role == MsgRole.user;
+        // 刚顶替掉等待气泡的那条回复:把状态行原样接过来再收走(见 _Handoff)。
+        // 窗口取得短,是因为往上翻再翻回来时不该再演一遍。
+        final handoff =
+            m.role == MsgRole.ai &&
+                !running &&
+                now - m.at < 500 &&
+                ask?.role == MsgRole.user
+            ? ((m.at - ask!.at) ~/ 1000).clamp(0, 9999)
+            : null;
         return _Enter(
           key: ValueKey(m.id),
           // 刚发出、刚回来的才播。按消息时间判:打开历史会话时那些消息都是旧的,
           // 不会一进来整屏一起动;往上翻再翻回来早过了这个窗口,也不重播。
-          animate: now - m.at < 1500,
+          // 接了状态行的那条不播 —— 它本来就该稳稳停在等待气泡原来的位置。
+          animate: now - m.at < 1500 && handoff == null,
           // AI 回复和报错是顶替「正在跑」那条出现的,再从 0 长高一遍会先塌后涨
           grow: m.role == MsgRole.user,
           child: _MsgTile(
@@ -381,6 +391,7 @@ class _AssistantPageState extends ConsumerState<AssistantPage> {
             fontSize: fontSize,
             onLongPress: () => _menu(m),
             onRetry: retryable ? () => _retryFrom(ask!.id) : null,
+            handoffSecs: handoff,
           ),
         );
       },
@@ -884,6 +895,7 @@ class _MsgTile extends ConsumerWidget {
     this.prev,
     this.live = false,
     this.onRetry,
+    this.handoffSecs,
   });
 
   final AssistantMsg msg;
@@ -900,6 +912,10 @@ class _MsgTile extends ConsumerWidget {
 
   /// 消息正文的字号(助手设置里调)。
   final double fontSize;
+
+  /// 非空 = 这条刚顶替掉「正在跑」那张气泡,值是那一轮等了几秒。
+  /// 状态行照原样再摆一下再收走,结果条跟着长出来(见 [_Handoff])。
+  final int? handoffSecs;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1022,13 +1038,37 @@ class _MsgTile extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (handoffSecs case final s?)
+                    _Handoff(
+                      open: false,
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: pendingStatusRow(
+                          context,
+                          stage: '',
+                          secs: s,
+                          fontSize: fontSize,
+                          style: context.texts.bodyMedium!.copyWith(
+                            fontSize: fontSize,
+                            height: 1.6,
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ),
                   ReplyBody(msg.text, fontSize: fontSize),
                   if (asText) ...[
                     const SizedBox(height: 10),
                     PromptTextBlocks(msg.draw!, fontSize: fontSize),
                   ],
                   if (strip) ...[
-                    ResultStrip(msg: msg, prev: prev),
+                    if (handoffSecs != null)
+                      _Handoff(
+                        open: true,
+                        child: ResultStrip(msg: msg, prev: prev),
+                      )
+                    else
+                      ResultStrip(msg: msg, prev: prev),
                     // 不再是最后一份时这一排收起来,不一下子抽掉。没按钮时也留着这层
                     // (零高),否则收起来没有动画可播。
                     AnimatedSize(
@@ -1272,8 +1312,8 @@ class _PendingBubble extends StatefulWidget {
 class _PendingBubbleState extends State<_PendingBubble> {
   late final Timer _tick;
 
-  /// 思考那块收起来了。默认摊开 —— 开了思考的模型多半就是想看它在想什么。
-  bool _thinkFolded = false;
+  /// 用户手动拨过的开合。null = 没拨过,按「还没开始写正文就摊开」走。
+  bool? _thinkManual;
 
   @override
   void initState() {
@@ -1305,11 +1345,16 @@ class _PendingBubbleState extends State<_PendingBubble> {
       height: 1.6,
       color: scheme.onSurfaceVariant,
     );
-    final live = widget.text.isNotEmpty || widget.reasoning.isNotEmpty;
+    final hasThink = widget.reasoning.isNotEmpty;
+    final live = widget.text.isNotEmpty || hasThink;
+    // 正文一开始写就把思考收起来 —— 那会儿该看的是答案。用户自己拨过就听他的。
+    final open = _thinkManual ?? widget.text.isEmpty;
     return ConstrainedBox(
       // 吐字之后按 AI 气泡同一个上限断行;还没吐字时那行状态文案自己多宽算多宽
       constraints: BoxConstraints(
-        maxWidth: live ? MediaQuery.sizeOf(context).width * .84 : double.infinity,
+        maxWidth: live
+            ? MediaQuery.sizeOf(context).width * .84
+            : double.infinity,
       ),
       child: Container(
         padding: const EdgeInsets.fromLTRB(14, 11, 16, 11),
@@ -1321,46 +1366,39 @@ class _PendingBubbleState extends State<_PendingBubble> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox.square(
-                  dimension: widget.fontSize + 3,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.2,
-                    color: scheme.primary,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                // 「正在想」「正在查资料」来回换时淡入淡出;左对齐叠放,长短不同的两句不会横着晃
-                AnimatedSwitcher(
-                  duration: Motion.fast,
-                  layoutBuilder: (current, previous) => Stack(
-                    alignment: Alignment.centerLeft,
-                    children: [...previous, ?current],
-                  ),
-                  child: Text(
-                    widget.stage.isEmpty ? '正在想…' : widget.stage,
-                    key: ValueKey(widget.stage),
-                    style: style,
-                  ),
-                ),
-                if (secs != null) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    '$secs 秒',
-                    style: style.copyWith(
-                      color: scheme.outline,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                ],
-              ],
+            // 状态行本身就是思考那块的下拉头:有思考可看时点它开合,没有就是一行字
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: hasThink
+                  ? () => setState(() => _thinkManual = !open)
+                  : null,
+              child: pendingStatusRow(
+                context,
+                stage: widget.stage,
+                secs: secs,
+                fontSize: widget.fontSize,
+                style: style,
+                trailing: hasThink
+                    ? AnimatedRotation(
+                        turns: open ? .5 : 0,
+                        duration: Motion.fast,
+                        curve: Motion.standard,
+                        child: Icon(
+                          Icons.expand_more,
+                          size: widget.fontSize + 2,
+                          color: scheme.outline,
+                        ),
+                      )
+                    : null,
+              ),
             ),
-            if (widget.reasoning.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              _think(scheme),
-            ],
+            if (hasThink)
+              AnimatedSize(
+                duration: Motion.fast,
+                curve: Motion.standard,
+                alignment: Alignment.topLeft,
+                child: open ? _think(scheme) : const SizedBox(width: 1),
+              ),
             if (widget.text.isNotEmpty) ...[
               const SizedBox(height: 8),
               // 不套 AnimatedSize:每秒十几帧的增量,补间只会让字一直在抖
@@ -1372,55 +1410,119 @@ class _PendingBubbleState extends State<_PendingBubble> {
     );
   }
 
-  /// 思考过程:小一号的灰字,限高四行,点一下收起。
+  /// 思考过程:小一号的灰字,限高四行。
   ///
   /// 超出限高时只显示最新写出来的那几句 —— `reverse` 的滚动视图天然吸在底,
   /// 不必为了跟着最新一行去挂控制器。
-  Widget _think(ColorScheme scheme) {
-    final style = context.texts.labelSmall!.copyWith(
-      fontSize: widget.fontSize - 2,
-      height: 1.5,
-      color: scheme.outline,
-    );
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => setState(() => _thinkFolded = !_thinkFolded),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('思考', style: style),
-              Icon(
-                _thinkFolded ? Icons.expand_more : Icons.expand_less,
-                size: widget.fontSize,
-                color: scheme.outline,
-              ),
-            ],
+  Widget _think(ColorScheme scheme) => Padding(
+    padding: const EdgeInsets.only(top: 6),
+    child: ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: (widget.fontSize - 2) * 1.5 * 4),
+      child: SingleChildScrollView(
+        reverse: true,
+        physics: const NeverScrollableScrollPhysics(),
+        child: Text(
+          widget.reasoning,
+          style: context.texts.labelSmall!.copyWith(
+            fontSize: widget.fontSize - 2,
+            height: 1.5,
+            color: scheme.outline,
           ),
-          AnimatedSize(
-            duration: Motion.fast,
-            curve: Motion.standard,
-            alignment: Alignment.topLeft,
-            child: _thinkFolded
-                ? const SizedBox(width: double.infinity)
-                : ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: (widget.fontSize - 2) * 1.5 * 4,
-                    ),
-                    child: SingleChildScrollView(
-                      reverse: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      child: Text(widget.reasoning, style: style),
-                    ),
-                  ),
-          ),
-        ],
+        ),
       ),
-    );
+    ),
+  );
+}
+
+/// 「思考中 · 12 秒」这一行。等待气泡与刚换过来的回复气泡共用 —— 换场时两边
+/// 长得一模一样,那一行才像是自己淡出去的,而不是整块重画。
+Widget pendingStatusRow(
+  BuildContext context, {
+  required String stage,
+  required int? secs,
+  required double fontSize,
+  required TextStyle style,
+  Widget? trailing,
+}) {
+  final scheme = context.scheme;
+  return Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      SizedBox.square(
+        dimension: fontSize + 3,
+        child: CircularProgressIndicator(
+          strokeWidth: 2.2,
+          color: scheme.primary,
+        ),
+      ),
+      const SizedBox(width: 10),
+      // 「思考中」「查资料中」来回换时淡入淡出;左对齐叠放,长短不同的两句不会横着晃
+      AnimatedSwitcher(
+        duration: Motion.fast,
+        layoutBuilder: (current, previous) => Stack(
+          alignment: Alignment.centerLeft,
+          children: [...previous, ?current],
+        ),
+        child: Text(
+          stage.isEmpty ? '思考中' : stage,
+          key: ValueKey(stage),
+          style: style,
+        ),
+      ),
+      if (secs != null) ...[
+        const SizedBox(width: 8),
+        Text(
+          '$secs 秒',
+          style: style.copyWith(
+            color: scheme.outline,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      ],
+      if (trailing != null) ...[const SizedBox(width: 4), trailing],
+    ],
+  );
+}
+
+/// 换场用的一层:出现时先摆成**相反**的姿态,下一帧再过渡到 [open] 那一头。
+///
+/// 回复气泡是顶替「正在跑」那张出现的,两张长得几乎一样 —— 状态行用它收走、
+/// 结果条用它长出来,看着就是那张气泡自己变了,而不是换了一块。
+class _Handoff extends StatefulWidget {
+  const _Handoff({required this.open, required this.child});
+
+  /// 最终姿态:true = 长出来,false = 收走。
+  final bool open;
+  final Widget child;
+
+  @override
+  State<_Handoff> createState() => _HandoffState();
+}
+
+class _HandoffState extends State<_Handoff> {
+  late bool _open = !widget.open;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => _open = widget.open);
+    });
   }
+
+  @override
+  Widget build(BuildContext context) => AnimatedCrossFade(
+    duration: Motion.medium,
+    sizeCurve: Motion.emphasized,
+    firstCurve: Motion.standard,
+    secondCurve: Motion.standard,
+    alignment: Alignment.topLeft,
+    crossFadeState: _open
+        ? CrossFadeState.showFirst
+        : CrossFadeState.showSecond,
+    firstChild: widget.child,
+    secondChild: const SizedBox(width: double.infinity),
+  );
 }
 
 class _Thumb extends StatelessWidget {

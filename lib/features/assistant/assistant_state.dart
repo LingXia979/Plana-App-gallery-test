@@ -488,7 +488,7 @@ class AssistantNotifier extends Notifier<AssistantState> {
         liveReasoning: '',
         // 一开始是模型在想,不是在查资料:大多数轮次根本不调工具,开场就报「查资料」
         // 是在说一件还没发生、多半也不会发生的事。真调了工具再切过去(见下面的事件)。
-        stage: '正在想…',
+        stage: '思考中',
       ),
     );
     // 记录跟着这条提问一起开:下面还要等灵感库、规则这些,这期间按了停止也得收尾。
@@ -636,7 +636,7 @@ class AssistantNotifier extends Notifier<AssistantState> {
             // 就再也拿不到「查的是普拉娜」这件事了。
             tools.add(ToolTrace(name: name, subject: toolSubject(args)));
             _set(
-              state.copyWith(liveTools: List.of(tools), stage: '正在查资料…'),
+              state.copyWith(liveTools: List.of(tools), stage: '查资料中'),
               persist: false,
             );
           case AgentToolResult(:final name, :final summary):
@@ -649,7 +649,7 @@ class AssistantNotifier extends Notifier<AssistantState> {
             _set(
               // 结果回来之后模型接着想:可能再查一轮,可能出图,也可能只是回答个问题
               // (「芙兰是谁」查完就答,没有提示词可写)—— 所以不报「写提示词」
-              state.copyWith(liveTools: List.of(tools), stage: '正在想…'),
+              state.copyWith(liveTools: List.of(tools), stage: '思考中'),
               persist: false,
             );
           case AgentDelta(:final text, :final reasoning):
