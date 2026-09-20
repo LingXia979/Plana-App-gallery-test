@@ -142,6 +142,13 @@ void main() {
       expect(m.contributors.single.name, '戒红所');
     });
 
+    test('类型:composition 认作「构图」,不认识的不给角标', () {
+      expect(CodexType.parse('composition'), CodexType.composition);
+      expect(CodexType.composition.label, '构图');
+      expect(CodexType.parse('whatever'), CodexType.unknown);
+      expect(CodexType.unknown.label, isEmpty);
+    });
+
     test('CodexEntry.fromJson:tags / path / images / rev / isNew', () {
       final e = CodexEntry.fromJson({
         'id': 'c_0001',

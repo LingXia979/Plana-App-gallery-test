@@ -39,17 +39,20 @@ class CodexMedia {
   );
 }
 
-/// 法典类型:codex=成品词条图鉴;string=画师串/构图串词典;pack=合集包。
-/// app 侧三者渲染一致(都是「标题 + 提示词 + 例图」),仅作角标区分。
+/// 法典类型:codex=成品词条图鉴;string=画师串/画风串词典;composition=构图 /
+/// 服装 / 场景(原站 2026-08-31 从画风串里拆出来的);pack=合集包。
+/// app 侧几类渲染一致(都是「标题 + 提示词 + 例图」),仅作角标区分。
 enum CodexType {
   codex,
   string,
+  composition,
   pack,
   unknown;
 
   static CodexType parse(Object? v) => switch (v) {
     'codex' => CodexType.codex,
     'string' => CodexType.string,
+    'composition' => CodexType.composition,
     'pack' => CodexType.pack,
     _ => CodexType.unknown,
   };
@@ -57,6 +60,7 @@ enum CodexType {
   String get label => switch (this) {
     CodexType.codex => '法典',
     CodexType.string => '词典',
+    CodexType.composition => '构图',
     CodexType.pack => '合集',
     CodexType.unknown => '',
   };
