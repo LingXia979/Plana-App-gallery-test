@@ -44,8 +44,9 @@ MockClient _streamingClient(
 
 Future<({String raw, List<AgentDelta> deltas})> _run(
   http.Client c,
-  CustomEndpoint e,
-) async {
+  CustomEndpoint e, {
+  bool stream = true,
+}) async {
   final out = StringBuffer();
   final deltas = await directModelStream(
     c,
@@ -55,6 +56,7 @@ Future<({String raw, List<AgentDelta> deltas})> _run(
     think: ThinkLevel.auto,
     timeout: const Duration(seconds: 5),
     out: out,
+    stream: stream,
   ).toList();
   return (raw: out.toString(), deltas: deltas);
 }
@@ -279,6 +281,53 @@ void main() {
       );
       final r = await _run(c, _ep(AgentApiFormat.openai));
       expect(r.raw, '好的,画一张');
+    });
+
+    test('设置里关掉:不开流、一帧不推,打的还是原来那个地址', () async {
+      late Uri uri;
+      late String sent;
+      final c = _streamingClient(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {'content': '好的'},
+            },
+          ],
+        }),
+        contentType: 'application/json',
+        onRequest: (req, b) {
+          uri = req.url;
+          sent = b;
+        },
+      );
+      final r = await _run(c, _ep(AgentApiFormat.openai), stream: false);
+
+      expect(r.deltas, isEmpty, reason: '关着就该老老实实转圈到出结果');
+      expect(r.raw, '好的');
+      expect((jsonDecode(sent) as Map).containsKey('stream'), isFalse);
+      expect(uri.toString(), 'http://api.test/v1/chat/completions');
+    });
+
+    test('关掉时 Gemini 也回到 generateContent', () async {
+      late Uri uri;
+      final c = _streamingClient(
+        jsonEncode({
+          'candidates': [
+            {
+              'content': {
+                'parts': [
+                  {'text': '好的'},
+                ],
+              },
+            },
+          ],
+        }),
+        contentType: 'application/json',
+        onRequest: (req, _) => uri = req.url,
+      );
+      await _run(c, _ep(AgentApiFormat.google), stream: false);
+      expect(uri.path, '/v1/models/m1:generateContent');
+      expect(uri.queryParameters['alt'], isNull);
     });
 
     test('HTTP 错误体:把上游的话原样报出来', () async {

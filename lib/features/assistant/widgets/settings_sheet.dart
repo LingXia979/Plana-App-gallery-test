@@ -63,6 +63,13 @@ class _SettingsSheet extends ConsumerWidget {
             format: (v) => v.toStringAsFixed(0),
             onChanged: (v) => n.patch((o) => o.copyWith(fontSize: v)),
           ),
+          SettingRow(
+            icon: Icons.keyboard_outlined,
+            title: '流式输出',
+            desc: '逐字显示回复',
+            value: s.stream,
+            onChanged: (v) => n.patch((o) => o.copyWith(stream: v)),
+          ),
           settingSection(context, '出图'),
           SettingRow(
             icon: Icons.notes,

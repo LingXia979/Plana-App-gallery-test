@@ -101,6 +101,7 @@ class AssistantSettings {
     this.introVersion = 0,
     this.fontSize = fontSizeDefault,
     this.historyTurns = historyTurnsDefault,
+    this.stream = true,
   });
 
   /// 上下文轮数的默认值与可调范围。
@@ -175,6 +176,13 @@ class AssistantSettings {
   /// 不占轮数,调小了也不会丢。
   final int historyTurns;
 
+  /// 回复边写边显示。**只对自定义接口生效** —— 后端渠道还没开流(见 agent_stream)。
+  ///
+  /// 这一项与上面那几个「放权」开关不同类,默认**开着**:它不替用户决定任何事,
+  /// 只是把已经在发生的事显示出来。关掉 = 整段写完一次出,留给中转不认 `stream`
+  /// 字段、或者就是不想看字一个个蹦的人。
+  final bool stream;
+
   AssistantSettings copyWith({
     bool? autoGenerate,
     bool? inlineImage,
@@ -185,6 +193,7 @@ class AssistantSettings {
     int? introVersion,
     double? fontSize,
     int? historyTurns,
+    bool? stream,
   }) => AssistantSettings(
     autoGenerate: autoGenerate ?? this.autoGenerate,
     inlineImage: inlineImage ?? this.inlineImage,
@@ -195,6 +204,7 @@ class AssistantSettings {
     introVersion: introVersion ?? this.introVersion,
     fontSize: fontSize ?? this.fontSize,
     historyTurns: historyTurns ?? this.historyTurns,
+    stream: stream ?? this.stream,
   );
 
   Map<String, dynamic> toJson() => {
@@ -207,6 +217,7 @@ class AssistantSettings {
     'introVersion': introVersion,
     'fontSize': fontSize,
     'historyTurns': historyTurns,
+    'stream': stream,
   };
 
   factory AssistantSettings.fromJson(Map<String, dynamic> j) =>
@@ -222,6 +233,8 @@ class AssistantSettings {
             LibraryScope.values.asNameMap()[j['libraryScope']] ??
             LibraryScope.local,
         noDraw: j['noDraw'] == true,
+        // 缺键 = 老存档,按开算:新行为更好,不必等用户自己去翻设置
+        stream: j['stream'] != false,
         introVersion: switch (j['introVersion']) {
           final num v => v.toInt(),
           _ => 0,

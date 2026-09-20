@@ -237,6 +237,9 @@ Stream<AgentEvent> streamDirectPrompt({
   /// 用户选的模式(见 assistant_mode.dart),和预匹配判回来的一起挑段。
   List<String> chosenModes = const [],
   ThinkLevel think = ThinkLevel.auto,
+
+  /// 逐字显示(助手设置里的开关)。关掉就是老样子:整段收完再一次出。
+  bool stream = true,
   Duration timeout = const Duration(seconds: 120),
 
   /// 调试记录:系统提示、消息、每一跳的模型原话和工具结果都记进去。
@@ -336,6 +339,7 @@ Stream<AgentEvent> streamDirectPrompt({
         system: system,
         msgs: msgs,
         think: think,
+        stream: stream,
         timeout: timeout,
         out: buf,
       )) {
@@ -669,16 +673,19 @@ Stream<AgentDelta> directModelStream(
   required ThinkLevel think,
   required Duration timeout,
   required StringBuffer out,
+
+  /// 关掉就是老样子:一个 POST 收完整段,一帧都不推。
+  bool stream = true,
 }) async* {
   // 路径可配(中转改路径是常事),Gemini 那条还把模型名写在路径里、开流还要换方法名
   // —— 都由 CustomEndpoint 处理,这儿不再各拼各的。
-  final uri = e.chatStreamUri;
+  final uri = stream ? e.chatStreamUri : e.chatUri;
   final (headers, body) = directRequest(
     e,
     system: system,
     msgs: msgs,
     think: think,
-    stream: true,
+    stream: stream,
   );
   final req = http.Request('POST', uri)
     ..headers.addAll({
@@ -702,9 +709,10 @@ Stream<AgentDelta> directModelStream(
     throw BackendException(_errorOf(_tryJson(raw), resp.statusCode));
   }
   final Stream<String> lines;
-  if ((resp.headers['content-type'] ?? '').toLowerCase().contains(
-    'event-stream',
-  )) {
+  if (stream &&
+      (resp.headers['content-type'] ?? '').toLowerCase().contains(
+        'event-stream',
+      )) {
     lines = resp.stream
         .transform(utf8.decoder)
         .transform(const LineSplitter())
@@ -715,9 +723,10 @@ Stream<AgentDelta> directModelStream(
   } else {
     final raw = await resp.stream.bytesToString().timeout(timeout);
     final text = extractReplyText(e.format, _tryJson(raw));
-    if (text.isNotEmpty || !raw.contains('data:')) {
+    if (text.isNotEmpty || !stream || !raw.contains('data:')) {
       out.write(text); // 空的话由调用方报「模型回了一段空的」
-      if (text.isNotEmpty) yield _liveDelta(out, StringBuffer());
+      // 关着开关时一帧都不推:气泡就该老老实实转圈到出结果
+      if (text.isNotEmpty && stream) yield _liveDelta(out, StringBuffer());
       return;
     }
     // 类型写着 json、身子却是一串 SSE 帧 —— 有的中转就这德行。按帧收,

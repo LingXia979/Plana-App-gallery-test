@@ -587,6 +587,7 @@ class AssistantNotifier extends Notifier<AssistantState> {
             libraryScope: libraryScopeWire(scope),
             chosenModes: modeKeys,
             think: assistantSettingsOf(ref).thinkLevel,
+            stream: assistantSettingsOf(ref).stream,
             trace: trace,
           )
         : streamAgentPrompt(

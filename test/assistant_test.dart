@@ -1743,6 +1743,18 @@ void main() {
       expect(d.autoImport, isFalse);
       // 公共库上万条画师串,默认并进去等于把预匹配的准头让出去
       expect(d.libraryScope, LibraryScope.local);
+      // 逐字显示不属于「放权」那一类:它不替用户决定任何事,默认开着
+      expect(d.stream, isTrue);
+    });
+
+    test('逐字显示:存得下,老存档缺这个字段按开算', () {
+      expect(
+        AssistantSettings.fromJson(
+          const AssistantSettings(stream: false).toJson(),
+        ).stream,
+        isFalse,
+      );
+      expect(AssistantSettings.fromJson(const {}).stream, isTrue);
     });
 
     test('存得下也读得回来', () {
