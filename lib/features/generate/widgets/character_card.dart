@@ -12,7 +12,7 @@ import 'position_grid_dialog.dart';
 import 'section_card.dart';
 
 /// 角色面板(定稿版):每个角色一张内嵌圆角小卡。
-/// 行 1:电源开关 · 名称(+状态说明)· 站位徽章 · 删除
+/// 行 1:电源开关 · 名称(点名字改名,+状态说明)· 站位徽章 · 删除
 /// 行 2:提示词单行预览 + token 计数
 class CharacterCard extends ConsumerWidget {
   const CharacterCard({super.key, this.reorderIndex});
@@ -75,7 +75,7 @@ class CharacterCard extends ConsumerWidget {
                   Padding(
                     key: ValueKey('char${chars[i].id}'),
                     padding: EdgeInsets.only(top: i > 0 ? 9 : 0),
-                    child: _CharacterTile(char: chars[i]),
+                    child: _CharacterTile(char: chars[i], index: i),
                   ),
               ],
             ),
@@ -112,9 +112,53 @@ class CharacterCard extends ConsumerWidget {
 }
 
 class _CharacterTile extends ConsumerWidget {
-  const _CharacterTile({required this.char});
+  const _CharacterTile({required this.char, required this.index});
 
   final CharacterPrompt char;
+
+  /// 行序,只用来算改名留空时回落的默认名。
+  final int index;
+
+  /// 点名字改名。留空 = 回到默认的「角色 N」,N 按当前行序算,与新增时同一口径
+  /// (名字本就不是稳定句柄,认人靠 id)。
+  ///
+  /// 名字只在 app 内显示:载荷里没有这一项,导入也读不回来,所以改名不影响出图,
+  /// 也不必跟着图走。
+  Future<void> _rename(BuildContext context, GenerateNotifier notifier) async {
+    final fallback = '角色 ${index + 1}';
+    final ctrl = TextEditingController(text: char.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重命名'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: InputDecoration(
+            isDense: true,
+            hintText: fallback, // 留空就按默认编号显示
+          ),
+          onSubmitted: (v) => Navigator.pop(context, v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, ctrl.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (name == null) return; // 取消
+    final trimmed = name.trim();
+    notifier.updateCharacter(
+      char.id,
+      name: trimmed.isEmpty ? fallback : trimmed,
+    );
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -179,26 +223,38 @@ class _CharacterTile extends ConsumerWidget {
                         minHeight: 38,
                       ),
                     ),
-                    const SizedBox(width: 4),
                     // 名称 + 状态说明:占满中间,把尾部(徽章+删除)顶到最右
                     Expanded(
                       child: Row(
                         children: [
                           Flexible(
-                            child: Text(
-                              char.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: context.texts.bodyLarge!.copyWith(
-                                fontWeight: FontWeight.w700,
-                                color: enabled
-                                    ? scheme.onSurface
-                                    : scheme.outline,
+                            // 点名字改名:热区只包名字本身,外层那圈照旧点开编辑器
+                            // (里层先拿到这一下)。长按是整卡拖排序,这里不接。
+                            // 开关与名字之间原先的 4px 挪进内边距,名字位置不变。
+                            child: InkWell(
+                              onTap: () => _rename(context, notifier),
+                              borderRadius: BorderRadius.circular(8),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 4,
+                                  vertical: 4,
+                                ),
+                                child: Text(
+                                  char.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: context.texts.bodyLarge!.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                    color: enabled
+                                        ? scheme.onSurface
+                                        : scheme.outline,
+                                  ),
+                                ),
                               ),
                             ),
                           ),
                           if (!enabled) ...[
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 4),
                             // 不给 Flexible:状态标签是定长的,该让角色名去挤。
                             // 原先两个都 flex:1 平分,标签分到的一半装不下,
                             // 就从尾巴开始吃 —— 屏幕上只剩「已禁用 ·…」。
