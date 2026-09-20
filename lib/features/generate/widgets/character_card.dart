@@ -191,7 +191,9 @@ class _CharacterTile extends ConsumerWidget {
             context,
           ).push(sharedAxisRoute(EditorPage(positive: true, charId: char.id))),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+            // 上边距保持 10:行 1 高度由那枚删除按钮(40)定死,加了也只是把
+            // 开关和名字整体往下推。加高的是下边距,见行 2 那里。
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 14),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -342,7 +344,9 @@ class _CharacterTile extends ConsumerWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 4),
+                // 行 2 是点进编辑器的主要落点(行 1 那排全是各管各的按钮),
+                // 所以空当只往它上下加:4 → 8、下边距 10 → 14,这条带子 42 → 50。
+                const SizedBox(height: 8),
                 Padding(
                   padding: const EdgeInsets.only(left: 4, right: 6),
                   child: Row(
