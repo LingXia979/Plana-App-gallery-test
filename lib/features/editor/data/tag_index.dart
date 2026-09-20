@@ -136,7 +136,8 @@ class TagIndexSpec {
                   if (s.isNotEmpty && !s.startsWith('/')) s, // 去掉 /lh 之类快捷别名
               ]
             : const <String>[],
-        // 第 5 列 category 目前只填了 4(角色),其余留空 = 未定类,不是「普通标签」
+        // 第 5 列 category 是 Danbooru 类目(0 一般 / 1 画师 / 3 作品 / 4 角色 /
+        // 5 meta),这里只用得上角色;少数保留的旧行留空 = 未定类
         isChar: f.length > 4 && f[4] == '4',
       ));
     }

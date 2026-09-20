@@ -22,9 +22,9 @@ const kCodexSourceUrl = 'https://novelai.quicktagcloud.com/';
 const kDanbooruSearchUrl =
     'https://github.com/SuzumiyaAkizuki/DanbooruSearchOnline';
 
-/// 离线补全词库(`assets/danbooru.tsv`,随包分发)的来源:标签表、热度与绝大部分
-/// 中文译名取自其 `danbooru_e621_merged_with_zh.csv`。上游同为 GPL-3.0,再分发
-/// 合规 —— 详见 THIRD_PARTY_NOTICES.md。
+/// 离线补全词库(`assets/danbooru.tsv`,随包分发)的来源:标签表、热度、类目与
+/// 中文译名取自其 `danbooru_tags_full_zh.csv`(由 tool/import_tag_dict.dart 导入)。
+/// 上游同为 GPL-3.0,再分发合规 —— 详见 THIRD_PARTY_NOTICES.md。
 const kOfflineTagSourceUrl =
     'https://github.com/zhulinyv/Auto-NovelAI-Refactor';
 

@@ -10,17 +10,14 @@ import 'tag_index.dart';
 /// 用户在设置里显式选了「离线词库」时的英文补全走这里——**完全离线**,不碰网络,
 /// 天然绕开 Cloudflare。(2026-08-25 前它还是「未授权模式」的兜底,门禁解除后不再是。)
 /// 行格式(tab 分隔):`tag<TAB>post_count<TAB>中文<TAB>alias1,alias2<TAB>category`;
-/// tag 用下划线,app 内展示/插入转空格;中文来自社区词库(ChinaGPT 10w + byzod 精选合并)。
+/// tag 用下划线,app 内展示/插入转空格。
 ///
-/// **category 列(2026-09-05 补)**:Danbooru 类目编号,目前只填 4(角色),
-/// 共 26,083 行(count≥50 的目标集里 23,983 行,占 26.3%)。来源是后端两份建库
-/// 产物的并集 —— `tags_enhanced.csv` 的 category=4(20,169)+
-/// `role_tag_mapping.json` 的 role_en(28,335);两者交叉验证 19,263 条**完全一致**,
-/// 所以并集可直接用。画师(类目 1)与 meta(5)**上游没有**,要另跑 Danbooru
-/// `tags.json?search[category]=1` 采集,本轮没做;作品(3)只有 `tags_enhanced`
-/// 那 5,225 条可信 —— `role_tag_mapping.origin_en` 抽样只有 71% 真是作品
-/// (19.7% 其实是普通标签、9.2% 是角色,`kantoku`/`rella` 这种画师限定符被误提升),
-/// 故未采用。空 category = **未定类**,不等于「普通标签」。
+/// **2026-09-19 换成上游新词库**(Auto-NovelAI-Refactor 的 `danbooru_tags_full_zh.csv`,
+/// 由 tool/import_tag_dict.dart 导入):热度 ≥50 的 12.7 万行,每行都有中文,
+/// category 列是完整的 Danbooru 类目(0 一般 / 1 画师 / 3 作品 / 4 角色 / 5 meta)。
+/// 上游不再收录的几百条旧 tag 原样沿用旧词库(那几行的 category 可能留空 = 未定类)。
+/// 角色取并集:上游把几十条角色(罗小黑、赛马娘的衣装变体)标成了一般 tag,
+/// 旧词库那份经后端建库产物交叉验证的角色标记仍然算数。
 class LocalTagDb {
   Future<TagIndex?>? _index;
 

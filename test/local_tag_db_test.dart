@@ -220,10 +220,13 @@ void main() {
   }, timeout: const Timeout(Duration(seconds: 60)));
 
   test('cacheTagMeta:译名等于标签本身不收,刻意排版过的专有名词照收', () {
-    cacheTagMeta('rwby', trans: 'rwby');
-    expect(translationOf('rwby'), isNull, reason: '原样透传等于没翻译,占坑会挡住后端');
-    cacheTagMeta('pixiv id', trans: 'pixiv id');
-    expect(translationOf('pixiv id'), isNull, reason: '下划线转空格后仍是原样');
+    // 生造词:真实标签(rwby 之类)离线库里可能自带大写译名,测不到缓存这一层
+    cacheTagMeta('zzz echo exact', trans: 'zzz echo exact');
+    expect(
+      translationOf('zzz echo exact'),
+      isNull,
+      reason: '原样透传等于没翻译,占坑会挡住后端',
+    );
     cacheTagMeta('zzz_echo_tag', trans: 'zzz echo tag');
     expect(translationOf('zzz_echo_tag'), isNull, reason: '两边归一后相同,同样是没翻译');
 
