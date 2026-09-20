@@ -115,9 +115,9 @@ class _EndpointSheetState extends ConsumerState<_EndpointSheet> {
     if (id == null) return;
     final ok = await confirmDialog(
       context,
-      title: '删掉这个接口?',
-      message: '地址和 API Key 都会从本机删掉。已经发生过的对话不受影响。',
-      confirmLabel: '删掉',
+      title: '删除这个接口?',
+      message: '地址和 API Key 都会从本机删除。已经发生过的对话不受影响。',
+      confirmLabel: '删除',
     );
     if (!ok || !mounted) return;
     await ref.read(customEndpointsProvider.notifier).remove(id);
@@ -202,7 +202,7 @@ class _EndpointSheetState extends ConsumerState<_EndpointSheet> {
                 TextButton(
                   onPressed: _delete,
                   style: TextButton.styleFrom(foregroundColor: scheme.error),
-                  child: const Text('删掉'),
+                  child: const Text('删除'),
                 ),
               const Spacer(),
               FilledButton(onPressed: _save, child: const Text('保存')),
