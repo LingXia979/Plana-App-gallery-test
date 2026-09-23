@@ -67,32 +67,101 @@ class GalleryContextBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final scope = ref.watch(galleryBrowseAlbumProvider);
+    final target = ref.watch(gallerySaveTargetProvider);
     final albums = ref.watch(albumsProvider);
-    final browse = Align(
-      alignment: Alignment.centerLeft,
-      child: TextButton.icon(
-        style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 6),
-        ),
-        onPressed: () => showAlbumLibrary(context),
-        icon: const Icon(Icons.photo_library_outlined, size: 17),
-        label: Text(
-          '浏览：${albums.name(scope)} ▾',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+    return Material(
+      // 与胶片条共用底色，让图库选择成为缩略图区的一部分。
+      color: context.scheme.surface,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        // 按内容收紧，最长各占半行；只省略图库名，保留用途和下拉入口。
+        child: Row(
+          children: [
+            Flexible(
+              child: _GalleryContextPill(
+                label: '浏览',
+                albumName: albums.name(scope),
+                semanticLabel: '浏览图库：${albums.name(scope)}',
+                icon: Icons.photo_library_outlined,
+                onPressed: () => showAlbumLibrary(context),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: _GalleryContextPill(
+                label: '新图',
+                albumName: albums.name(target.albumId),
+                semanticLabel: '新图保存到：${albums.name(target.albumId)}',
+                icon: Icons.drive_file_move_outline,
+                onPressed: () => showAlbumLibrary(context, saveOnly: true),
+              ),
+            ),
+          ],
         ),
       ),
     );
-    return Material(
-      color: context.scheme.surfaceContainer,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        // 保持单行，窄屏和大字体时由按钮内的省略文字适配，避免挤高画布。
-        child: Row(
-          children: [
-            Expanded(child: browse),
-            const Expanded(child: GallerySaveTargetRow(compact: true)),
-          ],
+  }
+}
+
+class _GalleryContextPill extends StatelessWidget {
+  const _GalleryContextPill({
+    required this.label,
+    required this.albumName,
+    required this.semanticLabel,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String label;
+  final String albumName;
+  final String semanticLabel;
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = context.scheme;
+    return Tooltip(
+      message: semanticLabel,
+      excludeFromSemantics: true,
+      child: FilledButton.tonal(
+        style: FilledButton.styleFrom(
+          minimumSize: const Size(0, 30),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          // 视觉上是小胶囊，触摸范围仍保留 48dp。
+          tapTargetSize: MaterialTapTargetSize.padded,
+          visualDensity: VisualDensity.standard,
+          shape: const StadiumBorder(),
+          backgroundColor: scheme.surfaceContainerHigh,
+          foregroundColor: scheme.onSurfaceVariant,
+          textStyle: context.texts.bodySmall,
+        ),
+        onPressed: onPressed,
+        child: Semantics(
+          label: semanticLabel,
+          excludeSemantics: true,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14),
+              const SizedBox(width: 5),
+              Text(label),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  albumName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: scheme.onSurface,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 2),
+              const Icon(Icons.arrow_drop_down, size: 14),
+            ],
+          ),
         ),
       ),
     );

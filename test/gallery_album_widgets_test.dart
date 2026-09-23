@@ -614,13 +614,71 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets('图库胶囊分别切换浏览范围与新图保存位置', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final semantics = tester.ensureSemantics();
+    try {
+      await tester.pumpWidget(app(const GalleryPage()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('浏览图库：全部作品'));
+      await tester.pumpAndSettle();
+      expect(find.text('选择图库'), findsOneWidget);
+      await tester.tap(find.byType(AlbumCoverImage).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('加载图库'));
+      await tester.pumpAndSettle();
+      expect(c.read(galleryBrowseAlbumProvider), albumId);
+      expect(c.read(gallerySaveTargetProvider).albumId, isNull);
+
+      await tester.tap(find.byTooltip('新图保存到：全部作品'));
+      await tester.pumpAndSettle();
+      expect(find.text('新图保存到'), findsOneWidget);
+      await tester.tap(find.byType(AlbumCoverImage).last);
+      await tester.pumpAndSettle();
+      expect(find.text('新图也保存到这里'), findsNothing);
+      await tester.tap(find.text('新图保存到这里'));
+      await tester.pumpAndSettle();
+      expect(c.read(galleryBrowseAlbumProvider), albumId);
+      expect(c.read(gallerySaveTargetProvider).albumId, albumId);
+
+      await tester.tap(find.byTooltip('浏览图库：表情包'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(AlbumCoverImage).first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('加载图库'));
+      await tester.pumpAndSettle();
+      expect(c.read(galleryBrowseAlbumProvider), isNull);
+      expect(c.read(gallerySaveTargetProvider).albumId, albumId);
+      expect(find.bySemanticsLabel('浏览图库：全部作品'), findsOneWidget);
+      expect(find.bySemanticsLabel('新图保存到：表情包'), findsOneWidget);
+      await screenshot(tester, 'gallery-context-pills');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    } finally {
+      semantics.dispose();
+    }
+  });
+
   testWidgets('窄屏大字体图库和历史操作栏无溢出', (tester) async {
     tester.view.physicalSize = const Size(320, 640);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    const longName = '表情包与日常灵感收藏的长图库名称';
+    await tester.runAsync(() async {
+      final albums = c.read(albumsProvider.notifier);
+      await albums.rename(albumId, longName);
+      albums.browse(albumId, alsoSave: true);
+    });
     await tester.pumpWidget(app(const GalleryPage(), scale: 1.5, dark: true));
     await tester.pumpAndSettle();
+    expect(find.byTooltip('浏览图库：$longName'), findsOneWidget);
+    expect(find.byTooltip('新图保存到：$longName'), findsOneWidget);
     await screenshot(tester, 'gallery-dark-narrow');
     expect(tester.takeException(), isNull);
     await tester.runAsync(
